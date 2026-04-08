@@ -669,7 +669,7 @@ async def run_server(host: str, port: int, update_interval: float):
     server.set_server_name("OPC-UA Industrial Device Simulator")
 
     # Security: None/Anonymous for lab use — enable policies as needed
-    await server.set_security_IDs(["Anonymous"])
+    server.set_security_IDs(["Anonymous"])
 
     # Register a single application namespace for all simulated devices
     ns = await server.register_namespace("urn:nyle:opcua:simulator")
