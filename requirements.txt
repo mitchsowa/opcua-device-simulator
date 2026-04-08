@@ -1,0 +1,2 @@
+# OPC-UA server runtime — only external dependency
+asyncua>=1.1.0
