@@ -2,24 +2,28 @@
 
 A Python OPC-UA server that simulates realistic node trees for three common industrial devices:
 
-| Device | OPC-UA Provider | Simulated Address |
-|---|---|---|
-| **Opto22 groov RIO** | CODESYS 3.5 SoftPLC runtime | `192.168.1.10` |
-| **Siemens S7-1200** | TIA Portal V4.5 built-in OPC-UA server | `192.168.1.20` |
-| **Unitronics UniStream** | USC/Vision series native OPC-UA server | `192.168.1.30` |
+| Device | OPC-UA Provider |
+|---|---|
+| **Opto22 groov RIO** | CODESYS 3.5 SoftPLC runtime |
+| **Siemens S7-1200** | TIA Portal V4.5 built-in OPC-UA server |
+| **Unitronics UniStream** | USC/Vision series native OPC-UA server |
 
-All three devices share a single server endpoint but have isolated object trees — exactly as they would appear in UA Expert, an Ignition historian, or a SCADA data logger. Designed for developing and testing OPC-UA clients, dashboards, and data pipelines without physical hardware.
+Configure up to 12 device nodes (mixed or same type) via an interactive text menu. Two network modes: all devices on a single endpoint, or each on its own IP from a range. Config is saved to `opcua_sim_config.json` and reloaded on start. Designed for developing and testing OPC-UA clients, dashboards, and data pipelines without physical hardware.
 
 ---
 
 ## Features
 
+- **Interactive menu** — configure device types, counts, network mode, host, port, and update interval from a color TUI; config is persisted to `opcua_sim_config.json` and reloaded automatically
+- **Up to 12 devices** — mix and match Opto22, Siemens, and Unitronics nodes in any combination
+- **Two network modes** — run all devices on a single endpoint (`same_ip`), or assign each device its own virtual IP from a range (`ip_range` — auto-creates/cleans up virtual IPs on a chosen interface)
 - **Accurate node hierarchies** — each device's tree mirrors what you actually browse on the real hardware, not a generic flat layout
 - **Live simulation** — analog values follow sine waves with Gaussian noise, digital inputs toggle randomly, process loops (tank/flow/temp, PID FB) run continuously
 - **Writable nodes** — outputs, setpoints, and operands accept writes from any OPC-UA client; the simulator holds the value until its next update cycle
 - **CODESYS 3.5 structure** — groov RIO uses the real `DeviceSet/Resources/Application/` hierarchy with GVL Hungarian prefixes (`rAI_Channel_0`, `xDI_0`), task diagnostics, and an exposed `FB_PID_Inst`
 - **Siemens DB simulation** — `DB1_ProductionData` with a coupled pump/valve/tank/temp process loop; `DB2_Diagnostics` with CPU load and cycle time; running `TON` timers and `CTU` counters
 - **Unitronics operand model** — MI / ML / MB memory operands, system bits (SB2/SB3/SB5), 12-bit raw AI counts, data tables (DT0 process, DT1 alarms)
+- **Graceful shutdown** — Ctrl+C warns if OPC-UA clients are still connected and offers to keep running or force stop; returns to the menu in interactive mode
 - **Anonymous / no-security** by default — suitable for lab/VPN-isolated networks; security policies configurable via `asyncua`
 - No external dependencies beyond `asyncua`
 
@@ -45,9 +49,11 @@ pip install -r requirements.txt
 python opcua_sim.py
 ```
 
+The interactive menu lets you pick device types, counts, network mode, and connection settings. Config is saved to `opcua_sim_config.json` and reloaded next time you run.
+
 Then connect any OPC-UA client to:
 ```
-opc.tcp://localhost:4840/opcua/sim
+opc.tcp://<host>:4840/opcua/sim
 ```
 
 ---
@@ -55,39 +61,41 @@ opc.tcp://localhost:4840/opcua/sim
 ## Usage
 
 ```
-python opcua_sim.py [--host HOST] [--port PORT] [--interval SECONDS]
+python opcua_sim.py [--host HOST] [--port PORT] [--interval SECONDS] [--no-menu]
 
 Options:
   --host      Bind address          (default: 0.0.0.0)
-  --port      OPC-UA TCP port       (default: 4840)
-  --interval  Node update interval  (default: 1.0 s)
+  --port      OPC-UA port           (default: 4840)
+  --interval  Update interval in s  (default: 1.0)
+  --no-menu   Skip menu, use saved config or defaults
 ```
 
-Examples:
+### Interactive mode (default)
+
+Running `python opcua_sim.py` opens a text menu where you can:
+
+1. **Configure devices** — choose a device type and count (up to 12), or build a mixed list
+2. **Set network mode** — `same_ip` (all on one endpoint) or `ip_range` (one server per IP)
+3. **Set host / IP range** — bind address or starting IP for range mode
+4. **Set port and update interval**
+
+Press **R** to save config and start the server, **Q** to quit. Ctrl+C during the server returns to the menu.
+
+### Headless mode
+
 ```bash
-# Bind to localhost only, faster updates
-python opcua_sim.py --host 127.0.0.1 --interval 0.5
+# Use saved config (or defaults: one of each device on 0.0.0.0:4840)
+python opcua_sim.py --no-menu
 
-# Non-default port (e.g. alongside a real OPC-UA server)
-python opcua_sim.py --port 4841
-
-# Slow scan rate to match a slow PLC
-python opcua_sim.py --interval 5.0
+# Override host/port/interval
+python opcua_sim.py --no-menu --host 127.0.0.1 --port 4841 --interval 0.5
 ```
 
-Startup log:
-```
-2025-04-08 09:12:03 [INFO] Building OPC-UA node trees...
-2025-04-08 09:12:03 [INFO]   [groov RIO / CODESYS 3.5] Node tree built
-2025-04-08 09:12:03 [INFO]   [S7-1200] Node tree built
-2025-04-08 09:12:03 [INFO]   [Unitronics] Node tree built
-2025-04-08 09:12:03 [INFO] ============================================================
-2025-04-08 09:12:03 [INFO]   OPC-UA Simulator running at: opc.tcp://0.0.0.0:4840/opcua/sim
-2025-04-08 09:12:03 [INFO]   Namespace index : 2
-2025-04-08 09:12:03 [INFO]   Update interval : 1.0s
-2025-04-08 09:12:03 [INFO]   Devices         : Opto22 groov RIO | Siemens S7-1200 | Unitronics PLC
-2025-04-08 09:12:03 [INFO] ============================================================
-```
+### Network modes
+
+**Same IP** — all devices share a single OPC-UA endpoint. Device trees are isolated under the root Objects folder.
+
+**IP Range** — each device gets its own virtual IP on a chosen network interface. The simulator adds virtual IPs on startup (requires `sudo` for `ip addr add`) and removes them on shutdown. Example: 4 devices starting at `192.168.1.10` creates endpoints on `.10`, `.11`, `.12`, `.13`.
 
 ---
 
@@ -213,12 +221,12 @@ Scale to engineering units in your client: `EU = (raw / 4095.0) * span + offset`
 
 ```bash
 docker build -t opcua-sim .
-docker run -p 4840:4840 opcua-sim
+docker run -p 4840:4840 opcua-sim --no-menu
 ```
 
 Custom update interval:
 ```bash
-docker run -p 4840:4840 opcua-sim --interval 0.5
+docker run -p 4840:4840 opcua-sim --no-menu --interval 0.5
 ```
 
 ---
@@ -232,7 +240,7 @@ Description=OPC-UA Device Simulator
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/python3 /opt/opcua-device-simulator/opcua_sim.py --port 4840
+ExecStart=/usr/bin/python3 /opt/opcua-device-simulator/opcua_sim.py --no-menu --port 4840
 WorkingDirectory=/opt/opcua-device-simulator
 Restart=on-failure
 RestartSec=5
@@ -253,7 +261,7 @@ sudo systemctl status opcua-sim
 ## Enabling Security (Optional)
 
 The server starts with **Anonymous / No Security** — appropriate for a lab bench or VPN-isolated
-OT network. To add encryption or username authentication, modify `run_server()` in `opcua_sim.py`:
+OT network. To add encryption or username authentication, modify `run_single_server()` or `run_ip_range_server()` in `opcua_sim.py`:
 
 ```python
 from asyncua.crypto.security_policies import SecurityPolicyBasic256Sha256
@@ -286,10 +294,11 @@ See the [python-asyncua security docs](https://python-asyncua.readthedocs.io/en/
 
 ```
 opcua-device-simulator/
-├── opcua_sim.py        # Simulator — all three device classes + server bootstrap
-├── requirements.txt    # Python dependencies
-├── setup.py            # Install as package / console script (optional)
-├── Dockerfile          # Container image
+├── opcua_sim.py              # Simulator — device classes, menu, server modes
+├── opcua_sim_config.json     # Saved config (auto-generated, gitignored)
+├── requirements.txt          # Python dependencies
+├── setup.py                  # Install as package / console script (optional)
+├── Dockerfile                # Container image
 ├── .gitignore
 └── README.md
 ```
@@ -301,7 +310,7 @@ opcua-device-simulator/
 Pull requests welcome. To add a new simulated device:
 
 1. Create a class following the existing pattern (`__init__`, `build`, `update`)
-2. Instantiate it in `run_server()` alongside the others
+2. Add it to `DEVICE_TYPES` and `DEVICE_CLASSES` in `opcua_sim.py`
 3. Document the node tree in this README
 
 ---
