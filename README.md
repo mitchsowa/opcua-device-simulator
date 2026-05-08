@@ -23,6 +23,7 @@ Configure up to 12 device nodes (mixed or same type) via an interactive text men
 - **CODESYS 3.5 structure** — groov RIO uses the real `DeviceSet/Resources/Application/` hierarchy with GVL Hungarian prefixes (`rAI_Channel_0`, `xDI_0`), task diagnostics, and an exposed `FB_PID_Inst`
 - **Siemens DB simulation** — `DB1_ProductionData` with a coupled pump/valve/tank/temp process loop; `DB2_Diagnostics` with CPU load and cycle time; running `TON` timers and `CTU` counters
 - **Unitronics operand model** — MI / ML / MB memory operands, system bits (SB2/SB3/SB5), 12-bit raw AI counts, data tables (DT0 process, DT1 alarms)
+- **Kiln controller tags** — every device includes a `KilnController/` folder with ~140 tags: setpoints, temperatures, schedule arrays (41-step), VFD/HRV motor arrays, power/energy metering, demand response, runtime counters, and unit identification
 - **Graceful shutdown** — Ctrl+C warns if OPC-UA clients are still connected and offers to keep running or force stop; returns to the menu in interactive mode
 - **Anonymous / no-security** by default — suitable for lab/VPN-isolated networks; security policies configurable via `asyncua`
 - No external dependencies beyond `asyncua`
@@ -214,6 +215,81 @@ AI values are raw 12-bit counts (0–4095).
 Scale to engineering units in your client: `EU = (raw / 4095.0) * span + offset`
 
 > **(W)** = writable node — accepts OPC-UA Write from a client.
+
+---
+
+### Kiln Controller Tags (all devices)
+
+Every device includes a `KilnController/` sub-folder with the following groups. This models a lumber dry kiln controller with realistic simulated values.
+
+```
+KilnController/
+├── UnitIdentification/
+│     TableVersion(1)  SerialNumber  PartNumber  UnitType  UnitId
+│     ControlVersion  HmiVersion  CompileDate  ManufactureDate
+│     Customer  SiteAddress  GPSCoordinates
+├── Setpoints/                                    (all writable)
+│     DryBulbSetpoint(160°F)  WetBulbSetpoint(140°F)
+│     EmcSetpoint(12%)  RhSetpoint(65%)
+│     DryBulbDeadband  WetBulbDeadband  McDeadband  RhDeadband
+│     SuctionLineSetpoint  OperatingMode  SprayMode  HeatMode
+│     RefrigMode  VentMode  HrvMode  ManualVentPercent
+│     VentImplosionSecs  FanManualSpeed  FanMode  HrvSpeed
+│     HrvDiff  VentDiff  GasEnable  LotId
+├── TemperaturesSensors/                          (simulated, drift toward setpoints)
+│     CtrlDryBulb  FwdDryBulb  RevDryBulb
+│     CtrlWetBulb  FwdWetBulb  RevWetBulb
+│     McCtrl  McFwd  McRev  RhCtrl  RhFwd  RhRev
+│     Dlp  Slp  Slt  Temp1..Temp5
+├── Commands/                                     (all writable)
+│     Start  Stop  Pause  DrEnable  DrMode
+│     ScheduleSkipForward  ScheduleSkipBackward
+├── StatusDisplay/
+│     CycleStatus  CurrentStep  FanStatus  HeatStatus  VentStatus
+│     SprayStatus  BlowerStatus  CompStatus1  DamperPct(0-100%)
+│     AlarmActive1..3  LightStack  LightStackStatus
+├── Schedule/
+│     ScheduleEnabled (W)  ScheduleFinished  RecipeCompletionTime
+│     ScheduleStop (W)  SchedulePause (W)
+├── ScheduleArrays/                               (ARRAY[0..40], writable, 5 steps populated)
+│     StepTime  StepMode  StepDbTemp  StepRh  StepMc
+│     StepExhaust  StepIntake  StepFan  StepWbSetpoint  StepPctSetpoint
+│     RampCtrl  RampTime  SprayCtrl  HtCtrl  HtSet  HtTime
+│     OverTempSet  HeaterCutOutSet  MoistureAddSet  MoistureShedSet
+│     DcCtrl  DcHeatTime  DcVentTime  DcRestTime  DcRepeat  DcRestFanOff
+│     EstStartTime  EstCompTime
+├── VfdHrv/                                       (ARRAY[0..7], 2 drives active)
+│     VfdFreq  VfdCurrent  VfdRpm  VfdFault  VfdStatus  VfdTemp
+│     VfdFaultReset (W)
+│     HrvFreq  HrvCurrent  HrvRpm  HrvFaultNumber  HrvFanFault
+│     HrvStatus  HrvInlet  HrvExhaust  HrvVfdTemp  HrvVfdFaultReset (W)
+│     KilnIntake  KilnExhaust
+├── TotalsRuntime/                                (incrementing counters)
+│     TotalRunTimeMinutes  FanRt  TotHeatOn  TotVentOn  TotRefrigOn
+├── PowerEnergy/                                  (sinusoidal 35-50 kW, derived values)
+│     ActivePower  ActiveFundPower  ActiveHarmonicPower
+│     ApparentPower  ReactivePower  PowerFactor
+│     RmsVoltage  RmsCurrent  VoltagePeak  CurrentPeak
+│     MeanPhaseAngle  VoltagePhaseAngle
+│     ForwardActiveEnergy  ForwardActiveFundEnergy  ForwardActiveHarmonicEnergy
+│     ReverseActiveEnergy  ReverseActiveFundEnergy  ReverseActiveHarmonicEnergy
+│     ForwardReactiveEnergy  ReverseReactiveEnergy  ApparentEnergy
+├── DemandResponse/
+│     DemandResponseEnabled (W)  DemandResponseMode (W)  DemandLimit (W)
+│     CurrentDemand  DemandShed  DemandShedPercent
+│     DemandResponsePackage  DrEventActive  DrRemainingTime
+└── Misc/
+      OneSecondPulse
+```
+
+**Simulation behavior:**
+- Temperatures converge toward writable setpoints with Gaussian noise; forward sensors read slightly above setpoint, reverse slightly below
+- Moisture content (MC) follows a slow downward drying curve modulated by a sine wave
+- Power varies sinusoidally (35–50 kW); apparent power, power factor, and RMS current are derived physically (`S = P / PF`, `I = P / (V × PF)`)
+- Energy accumulators (kWh, kVArh, kVAh) integrate continuously
+- VFD/HRV arrays simulate motor noise on the first 2 drives; temps drift with a slow sine
+- Runtime counters increment once per minute
+- Demand response tracks active power; shed is calculated when DR is enabled and demand exceeds the limit
 
 ---
 
