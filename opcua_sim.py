@@ -520,6 +520,428 @@ async def add_object(parent: Node, ns: int, name: str) -> Node:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Kiln Controller Tag Table (shared across all device types)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class KilnTags:
+    """
+    Kiln controller tag table — adds a KilnController folder with groups for
+    unit identification, setpoints, temperatures, commands, status, schedule,
+    VFD/HRV arrays, totals, power/energy, demand response, and misc tags.
+    """
+
+    def __init__(self):
+        self._tick = 0
+        self._start_time = time.time()
+
+    async def build(self, parent_node: Node, ns: int):
+        kiln = await add_folder(parent_node, ns, "KilnController")
+
+        # ── Unit Identification (static) ─────────────────────────────────────
+        uid = await add_folder(kiln, ns, "UnitIdentification")
+        await add_var(uid, ns, "TableVersion", 1)
+        await add_var(uid, ns, "SerialNumber", "SN-2024-00451")
+        await add_var(uid, ns, "PartNumber", "KD-4000-HT")
+        await add_var(uid, ns, "UnitType", 1)
+        await add_var(uid, ns, "UnitId", "KILN-001")
+        await add_var(uid, ns, "ControlVersion", 3.50)
+        await add_var(uid, ns, "HmiVersion", 2.10)
+        await add_var(uid, ns, "CompileDate", 20240115)
+        await add_var(uid, ns, "ManufactureDate", "2024-01-15")
+        await add_var(uid, ns, "Customer", "Nyle Engineering")
+        await add_var(uid, ns, "SiteAddress", "12 Stevens Rd, Brewer, ME 04412")
+        await add_var(uid, ns, "GPSCoordinates", "44.78686002624483, -68.76185949532186")
+
+        # ── Setpoints (writable) ─────────────────────────────────────────────
+        sp = await add_folder(kiln, ns, "Setpoints")
+        self.sp_dry_bulb = await add_var(sp, ns, "DryBulbSetpoint", 160.0, writable=True)
+        self.sp_wet_bulb = await add_var(sp, ns, "WetBulbSetpoint", 140.0, writable=True)
+        self.sp_emc = await add_var(sp, ns, "EmcSetpoint", 12.0, writable=True)
+        self.sp_rh = await add_var(sp, ns, "RhSetpoint", 65.0, writable=True)
+        self.sp_dry_bulb_db = await add_var(sp, ns, "DryBulbDeadband", 2.0, writable=True)
+        self.sp_wet_bulb_db = await add_var(sp, ns, "WetBulbDeadband", 2.0, writable=True)
+        self.sp_mc_db = await add_var(sp, ns, "McDeadband", 1.0, writable=True)
+        self.sp_rh_db = await add_var(sp, ns, "RhDeadband", 3.0, writable=True)
+        self.sp_suction_line = await add_var(sp, ns, "SuctionLineSetpoint", 38.0, writable=True)
+        self.sp_operating_mode = await add_var(sp, ns, "OperatingMode", 0, writable=True)
+        self.sp_spray_mode = await add_var(sp, ns, "SprayMode", 0, writable=True)
+        self.sp_heat_mode = await add_var(sp, ns, "HeatMode", 1, writable=True)
+        self.sp_refrig_mode = await add_var(sp, ns, "RefrigMode", 0, writable=True)
+        self.sp_vent_mode = await add_var(sp, ns, "VentMode", 1, writable=True)
+        self.sp_hrv_mode = await add_var(sp, ns, "HrvMode", 0, writable=True)
+        self.sp_manual_vent_pct = await add_var(sp, ns, "ManualVentPercent", 0, writable=True)
+        self.sp_vent_implosion = await add_var(sp, ns, "VentImplosionSecs", 5, writable=True)
+        self.sp_fan_manual_speed = await add_var(sp, ns, "FanManualSpeed", 0, writable=True)
+        self.sp_fan_mode = await add_var(sp, ns, "FanMode", 1, writable=True)
+        self.sp_hrv_speed = await add_var(sp, ns, "HrvSpeed", 0, writable=True)
+        self.sp_hrv_diff = await add_var(sp, ns, "HrvDiff", 5.0, writable=True)
+        self.sp_vent_diff = await add_var(sp, ns, "VentDiff", 3.0, writable=True)
+        self.sp_gas_enable = await add_var(sp, ns, "GasEnable", False, writable=True)
+        self.sp_lot_id = await add_var(sp, ns, "LotId", "LOT-2024-0001", writable=True)
+
+        # ── Temperatures & Sensors (read-only, simulated) ────────────────────
+        ts = await add_folder(kiln, ns, "TemperaturesSensors")
+        self.ctrl_dry_bulb = await add_var(ts, ns, "CtrlDryBulb", 158.5)
+        self.ctrl_wet_bulb = await add_var(ts, ns, "CtrlWetBulb", 138.2)
+        self.dlp = await add_var(ts, ns, "Dlp", 142.0)
+        self.fwd_dry_bulb = await add_var(ts, ns, "FwdDryBulb", 162.0)
+        self.fwd_wet_bulb = await add_var(ts, ns, "FwdWetBulb", 141.5)
+        self.mc_ctrl = await add_var(ts, ns, "McCtrl", 28.0)
+        self.mc_fwd = await add_var(ts, ns, "McFwd", 30.0)
+        self.mc_rev = await add_var(ts, ns, "McRev", 26.0)
+        self.rev_dry_bulb = await add_var(ts, ns, "RevDryBulb", 155.0)
+        self.rev_wet_bulb = await add_var(ts, ns, "RevWetBulb", 136.8)
+        self.rh_ctrl = await add_var(ts, ns, "RhCtrl", 64.0)
+        self.rh_fwd = await add_var(ts, ns, "RhFwd", 66.0)
+        self.rh_rev = await add_var(ts, ns, "RhRev", 62.0)
+        self.slp = await add_var(ts, ns, "Slp", 36.5)
+        self.slt = await add_var(ts, ns, "Slt", 37.2)
+        self.temp1 = await add_var(ts, ns, "Temp1", 157.0)
+        self.temp2 = await add_var(ts, ns, "Temp2", 159.0)
+        self.temp3 = await add_var(ts, ns, "Temp3", 156.5)
+        self.temp4 = await add_var(ts, ns, "Temp4", 160.2)
+        self.temp5 = await add_var(ts, ns, "Temp5", 158.8)
+
+        # ── Commands (writable) ──────────────────────────────────────────────
+        cmd = await add_folder(kiln, ns, "Commands")
+        self.cmd_dr_enable = await add_var(cmd, ns, "DrEnable", False, writable=True)
+        self.cmd_dr_mode = await add_var(cmd, ns, "DrMode", 0, writable=True)
+        self.cmd_pause = await add_var(cmd, ns, "Pause", False, writable=True)
+        self.cmd_skip_back = await add_var(cmd, ns, "ScheduleSkipBackward", False, writable=True)
+        self.cmd_skip_fwd = await add_var(cmd, ns, "ScheduleSkipForward", False, writable=True)
+        self.cmd_start = await add_var(cmd, ns, "Start", False, writable=True)
+        self.cmd_stop = await add_var(cmd, ns, "Stop", False, writable=True)
+
+        # ── Status & Display (read-only, simulated) ──────────────────────────
+        st = await add_folder(kiln, ns, "StatusDisplay")
+        self.alarm_active1 = await add_var(st, ns, "AlarmActive1", 0)
+        self.alarm_active2 = await add_var(st, ns, "AlarmActive2", 0)
+        self.alarm_active3 = await add_var(st, ns, "AlarmActive3", 0)
+        self.blower_status = await add_var(st, ns, "BlowerStatus", 1)
+        self.comp_status1 = await add_var(st, ns, "CompStatus1", 0)
+        self.current_step = await add_var(st, ns, "CurrentStep", 3)
+        self.cycle_status = await add_var(st, ns, "CycleStatus", 1)
+        self.damper_pct = await add_var(st, ns, "DamperPct", 45)
+        self.fan_status = await add_var(st, ns, "FanStatus", 1)
+        self.heat_status = await add_var(st, ns, "HeatStatus", 1)
+        self.light_stack = await add_var(st, ns, "LightStack", 2)
+        self.light_stack_status = await add_var(st, ns, "LightStackStatus", "Green")
+        self.spray_status = await add_var(st, ns, "SprayStatus", 0)
+        self.vent_status = await add_var(st, ns, "VentStatus", 1)
+
+        # ── Schedule (mixed) ─────────────────────────────────────────────────
+        sched = await add_folder(kiln, ns, "Schedule")
+        self.sched_enabled = await add_var(sched, ns, "ScheduleEnabled", True, writable=True)
+        self.recipe_completion = await add_var(sched, ns, "RecipeCompletionTime", "2024-12-15T18:00:00Z")
+        self.sched_finished = await add_var(sched, ns, "ScheduleFinished", False)
+        self.sched_stop = await add_var(sched, ns, "ScheduleStop", False, writable=True)
+        self.sched_pause = await add_var(sched, ns, "SchedulePause", False, writable=True)
+
+        # ── Schedule Arrays (ARRAY[0..40], 41 elements each, writable) ───────
+        sa = await add_folder(kiln, ns, "ScheduleArrays")
+
+        def _pad_bool(first5): return first5 + [False] * 36
+        def _pad_int(first5): return first5 + [0] * 36
+        def _pad_float(first5): return first5 + [0.0] * 36
+        def _pad_str(first5): return first5 + [""] * 36
+
+        await add_var(sa, ns, "DcCtrl", _pad_bool([False, False, True, True, False]), writable=True)
+        await add_var(sa, ns, "DcHeatTime", _pad_int([0, 0, 1800, 1800, 0]), writable=True)
+        await add_var(sa, ns, "DcRepeat", _pad_int([0, 0, 3, 2, 0]), writable=True)
+        await add_var(sa, ns, "DcRestFanOff", _pad_bool([False, False, True, False, False]), writable=True)
+        await add_var(sa, ns, "DcRestTime", _pad_int([0, 0, 600, 600, 0]), writable=True)
+        await add_var(sa, ns, "DcVentTime", _pad_int([0, 0, 300, 300, 0]), writable=True)
+        await add_var(sa, ns, "EstCompTime", _pad_str(["2024-12-15T08:00Z", "2024-12-15T10:00Z", "2024-12-15T13:00Z", "2024-12-15T16:00Z", "2024-12-15T18:00Z"]), writable=True)
+        await add_var(sa, ns, "EstStartTime", _pad_str(["2024-12-15T06:00Z", "2024-12-15T08:00Z", "2024-12-15T10:00Z", "2024-12-15T13:00Z", "2024-12-15T16:00Z"]), writable=True)
+        await add_var(sa, ns, "HeaterCutOutSet", _pad_float([180.0, 185.0, 190.0, 185.0, 0.0]), writable=True)
+        await add_var(sa, ns, "HtCtrl", _pad_bool([True, True, True, True, False]), writable=True)
+        await add_var(sa, ns, "HtSet", _pad_float([140.0, 155.0, 165.0, 160.0, 0.0]), writable=True)
+        await add_var(sa, ns, "HtTime", _pad_int([3600, 7200, 10800, 10800, 0]), writable=True)
+        await add_var(sa, ns, "MoistureAddSet", _pad_float([0.0, 0.0, 2.0, 1.5, 0.0]), writable=True)
+        await add_var(sa, ns, "MoistureShedSet", _pad_float([5.0, 4.0, 3.0, 2.0, 0.0]), writable=True)
+        await add_var(sa, ns, "OverTempSet", _pad_float([200.0, 200.0, 210.0, 200.0, 0.0]), writable=True)
+        await add_var(sa, ns, "RampCtrl", _pad_bool([True, True, False, False, False]), writable=True)
+        await add_var(sa, ns, "RampTime", _pad_int([1800, 3600, 0, 0, 0]), writable=True)
+        await add_var(sa, ns, "SprayCtrl", _pad_bool([False, True, True, False, False]), writable=True)
+        await add_var(sa, ns, "StepDbTemp", _pad_float([140.0, 155.0, 170.0, 160.0, 0.0]), writable=True)
+        await add_var(sa, ns, "StepExhaust", _pad_int([20, 30, 50, 40, 0]), writable=True)
+        await add_var(sa, ns, "StepFan", _pad_int([80, 85, 90, 85, 0]), writable=True)
+        await add_var(sa, ns, "StepIntake", _pad_int([15, 25, 40, 30, 0]), writable=True)
+        await add_var(sa, ns, "StepMc", _pad_int([30, 25, 18, 12, 0]), writable=True)
+        await add_var(sa, ns, "StepMode", _pad_int([1, 1, 2, 2, 0]), writable=True)
+        await add_var(sa, ns, "StepPctSetpoint", _pad_float([100.0, 100.0, 100.0, 100.0, 0.0]), writable=True)
+        await add_var(sa, ns, "StepRh", _pad_int([80, 70, 55, 45, 0]), writable=True)
+        await add_var(sa, ns, "StepTime", _pad_int([7200, 7200, 10800, 7200, 0]), writable=True)
+        await add_var(sa, ns, "StepWbSetpoint", _pad_float([130.0, 135.0, 140.0, 138.0, 0.0]), writable=True)
+
+        # ── VFD & HRV (ARRAY[0..7], 8 elements each) ────────────────────────
+        vfd = await add_folder(kiln, ns, "VfdHrv")
+
+        def _pad8_float(first2): return first2 + [0.0] * 6
+        def _pad8_int(first2): return first2 + [0] * 6
+        def _pad8_bool(first2): return first2 + [False] * 6
+
+        self.hrv_current = await add_var(vfd, ns, "HrvCurrent", _pad8_float([12.5, 11.8]))
+        self.hrv_exhaust = await add_var(vfd, ns, "HrvExhaust", _pad8_float([145.0, 142.0]))
+        await add_var(vfd, ns, "HrvFanFault", [False] * 8)
+        await add_var(vfd, ns, "HrvFaultNumber", [0] * 8)
+        self.hrv_freq = await add_var(vfd, ns, "HrvFreq", _pad8_float([55.0, 52.0]))
+        self.hrv_inlet = await add_var(vfd, ns, "HrvInlet", _pad8_float([85.0, 82.0]))
+        self.hrv_rpm = await add_var(vfd, ns, "HrvRpm", _pad8_float([1650.0, 1560.0]))
+        await add_var(vfd, ns, "HrvStatus", _pad8_int([1, 1]))
+        await add_var(vfd, ns, "HrvVfdFaultReset", [False] * 8, writable=True)
+        self.hrv_vfd_temp = await add_var(vfd, ns, "HrvVfdTemp", _pad8_float([105.0, 102.0]))
+        self.kiln_exhaust = await add_var(vfd, ns, "KilnExhaust", _pad8_float([148.0, 145.0]))
+        self.kiln_intake = await add_var(vfd, ns, "KilnIntake", _pad8_float([78.0, 75.0]))
+        self.vfd_current = await add_var(vfd, ns, "VfdCurrent", _pad8_float([18.5, 17.2]))
+        await add_var(vfd, ns, "VfdFault", [0] * 8)
+        await add_var(vfd, ns, "VfdFaultReset", [False] * 8, writable=True)
+        self.vfd_freq = await add_var(vfd, ns, "VfdFreq", _pad8_float([58.0, 55.0]))
+        self.vfd_rpm = await add_var(vfd, ns, "VfdRpm", _pad8_float([1740.0, 1650.0]))
+        await add_var(vfd, ns, "VfdStatus", _pad8_int([1, 1]))
+        self.vfd_temp = await add_var(vfd, ns, "VfdTemp", _pad8_float([115.0, 110.0]))
+
+        # ── Totals & Runtime (read-only, simulated counters) ─────────────────
+        tot = await add_folder(kiln, ns, "TotalsRuntime")
+        self.fan_rt = await add_var(tot, ns, "FanRt", 14400)
+        self.total_run_time = await add_var(tot, ns, "TotalRunTimeMinutes", 15000)
+        self.tot_heat_on = await add_var(tot, ns, "TotHeatOn", 12000)
+        self.tot_refrig_on = await add_var(tot, ns, "TotRefrigOn", 3000)
+        self.tot_vent_on = await add_var(tot, ns, "TotVentOn", 8000)
+
+        # ── Power & Energy (read-only, simulated) ────────────────────────────
+        pwr = await add_folder(kiln, ns, "PowerEnergy")
+        self.active_fund_power = await add_var(pwr, ns, "ActiveFundPower", 42.0)
+        self.active_harmonic_power = await add_var(pwr, ns, "ActiveHarmonicPower", 0.8)
+        self.active_power = await add_var(pwr, ns, "ActivePower", 42.8)
+        self.apparent_energy = await add_var(pwr, ns, "ApparentEnergy", 12500.0)
+        self.apparent_power = await add_var(pwr, ns, "ApparentPower", 48.5)
+        self.current_peak = await add_var(pwr, ns, "CurrentPeak", 95.0)
+        self.fwd_active_energy = await add_var(pwr, ns, "ForwardActiveEnergy", 48500.0)
+        self.fwd_active_fund_energy = await add_var(pwr, ns, "ForwardActiveFundEnergy", 47800.0)
+        self.fwd_active_harm_energy = await add_var(pwr, ns, "ForwardActiveHarmonicEnergy", 700.0)
+        self.fwd_reactive_energy = await add_var(pwr, ns, "ForwardReactiveEnergy", 15200.0)
+        self.mean_phase_angle = await add_var(pwr, ns, "MeanPhaseAngle", 28.0)
+        self.power_factor = await add_var(pwr, ns, "PowerFactor", 0.88)
+        self.reactive_power = await add_var(pwr, ns, "ReactivePower", 22.5)
+        self.rev_active_energy = await add_var(pwr, ns, "ReverseActiveEnergy", 120.0)
+        self.rev_active_fund_energy = await add_var(pwr, ns, "ReverseActiveFundEnergy", 118.0)
+        self.rev_active_harm_energy = await add_var(pwr, ns, "ReverseActiveHarmonicEnergy", 2.0)
+        self.rev_reactive_energy = await add_var(pwr, ns, "ReverseReactiveEnergy", 45.0)
+        self.rms_current = await add_var(pwr, ns, "RmsCurrent", 68.5)
+        self.rms_voltage = await add_var(pwr, ns, "RmsVoltage", 480.0)
+        self.voltage_peak = await add_var(pwr, ns, "VoltagePeak", 679.0)
+        self.voltage_phase_angle = await add_var(pwr, ns, "VoltagePhaseAngle", 0.0)
+
+        # ── Demand Response (mixed) ──────────────────────────────────────────
+        dr = await add_folder(kiln, ns, "DemandResponse")
+        self.current_demand = await add_var(dr, ns, "CurrentDemand", 42.8)
+        self.demand_limit = await add_var(dr, ns, "DemandLimit", 100.0, writable=True)
+        self.dr_enabled = await add_var(dr, ns, "DemandResponseEnabled", False, writable=True)
+        self.dr_mode = await add_var(dr, ns, "DemandResponseMode", 0, writable=True)
+        self.dr_package = await add_var(dr, ns, "DemandResponsePackage", 0)
+        self.demand_shed = await add_var(dr, ns, "DemandShed", 0.0)
+        self.demand_shed_pct = await add_var(dr, ns, "DemandShedPercent", 0.0)
+        self.dr_event_active = await add_var(dr, ns, "DrEventActive", False)
+        self.dr_remaining_time = await add_var(dr, ns, "DrRemainingTime", 0)
+
+        # ── Misc ─────────────────────────────────────────────────────────────
+        misc = await add_folder(kiln, ns, "Misc")
+        self.one_sec_pulse = await add_var(misc, ns, "OneSecondPulse", False)
+
+        log.info("  [KilnController] Tag table built — setpoints, temps, schedule arrays, VFD/HRV, power/energy")
+
+    async def update(self):
+        self._tick += 1
+        t = time.time() - self._start_time
+
+        # ── 1. Temperatures: drift toward setpoints with noise ───────────────
+        db_sp = await self.sp_dry_bulb.read_value()
+        wb_sp = await self.sp_wet_bulb.read_value()
+        rh_sp = await self.sp_rh.read_value()
+
+        # Ctrl dry bulb drifts toward setpoint
+        ctrl_db = await self.ctrl_dry_bulb.read_value()
+        ctrl_db += (db_sp - ctrl_db) * 0.05 + random.gauss(0, 0.3)
+        await self.ctrl_dry_bulb.write_value(round(ctrl_db, 1))
+
+        # Fwd dry bulb slightly above setpoint
+        fwd_db = db_sp + 2.0 + random.gauss(0, 0.4)
+        await self.fwd_dry_bulb.write_value(round(fwd_db, 1))
+
+        # Rev dry bulb slightly below setpoint
+        rev_db = db_sp - 5.0 + random.gauss(0, 0.4)
+        await self.rev_dry_bulb.write_value(round(rev_db, 1))
+
+        # Ctrl wet bulb drifts toward setpoint
+        ctrl_wb = await self.ctrl_wet_bulb.read_value()
+        ctrl_wb += (wb_sp - ctrl_wb) * 0.05 + random.gauss(0, 0.3)
+        await self.ctrl_wet_bulb.write_value(round(ctrl_wb, 1))
+
+        # Fwd/Rev wet bulb
+        fwd_wb = wb_sp + 1.5 + random.gauss(0, 0.3)
+        await self.fwd_wet_bulb.write_value(round(fwd_wb, 1))
+        rev_wb = wb_sp - 3.2 + random.gauss(0, 0.3)
+        await self.rev_wet_bulb.write_value(round(rev_wb, 1))
+
+        # Temp1-5 vary around CtrlDryBulb
+        for i, node in enumerate([self.temp1, self.temp2, self.temp3, self.temp4, self.temp5]):
+            await node.write_value(round(ctrl_db + random.gauss(0, 1.0), 1))
+
+        # DLP and SLP/SLT
+        await self.dlp.write_value(round(wb_sp + 2.0 + random.gauss(0, 0.5), 1))
+        sl_sp = await self.sp_suction_line.read_value()
+        await self.slp.write_value(round(sl_sp - 1.5 + random.gauss(0, 0.3), 1))
+        await self.slt.write_value(round(sl_sp - 0.8 + random.gauss(0, 0.3), 1))
+
+        # ── 2. Moisture & RH ────────────────────────────────────────────────
+        # MC slowly decreases over time (drying), modulated by sine
+        mc_base = max(6.0, 28.0 - t / 600.0)  # slow downward trend
+        mc_mod = 2.0 * math.sin(t / 120.0)
+        await self.mc_ctrl.write_value(round(mc_base + mc_mod + random.gauss(0, 0.3), 1))
+        await self.mc_fwd.write_value(round(mc_base + 2.0 + mc_mod + random.gauss(0, 0.3), 1))
+        await self.mc_rev.write_value(round(mc_base - 2.0 + mc_mod + random.gauss(0, 0.3), 1))
+
+        # RH floats near setpoint
+        await self.rh_ctrl.write_value(round(rh_sp + random.gauss(0, 1.5), 1))
+        await self.rh_fwd.write_value(round(rh_sp + 1.0 + random.gauss(0, 1.5), 1))
+        await self.rh_rev.write_value(round(rh_sp - 1.0 + random.gauss(0, 1.5), 1))
+
+        # ── 3. Status & Display ──────────────────────────────────────────────
+        await self.cycle_status.write_value(1)
+
+        # Fan/Heat/Vent toggle occasionally
+        if random.random() < 0.02:
+            fs = await self.fan_status.read_value()
+            await self.fan_status.write_value(0 if fs else 1)
+        if random.random() < 0.02:
+            hs = await self.heat_status.read_value()
+            await self.heat_status.write_value(0 if hs else 1)
+        if random.random() < 0.02:
+            vs = await self.vent_status.read_value()
+            await self.vent_status.write_value(0 if vs else 1)
+
+        # Damper varies sinusoidally 30-70%
+        damper = int(50 + 20 * math.sin(t / 30.0))
+        await self.damper_pct.write_value(damper)
+
+        # CurrentStep increments slowly (cycles through 0-4)
+        step = int(t / 300) % 5
+        await self.current_step.write_value(step)
+
+        # LightStack: 2=Green when running, 3=Yellow if alarm
+        alarm1 = await self.alarm_active1.read_value()
+        if alarm1:
+            await self.light_stack.write_value(3)
+            await self.light_stack_status.write_value("Yellow")
+        else:
+            await self.light_stack.write_value(2)
+            await self.light_stack_status.write_value("Green")
+
+        # Random alarm injection
+        if random.random() < 0.005:
+            await self.alarm_active1.write_value(random.randint(1, 5))
+        elif random.random() < 0.05:
+            await self.alarm_active1.write_value(0)
+
+        # ── 4. VFD & HRV arrays ─────────────────────────────────────────────
+        # Update first 2 elements with noise around defaults
+        for arr_node, defaults in [
+            (self.vfd_freq, [58.0, 55.0]),
+            (self.vfd_current, [18.5, 17.2]),
+            (self.vfd_rpm, [1740.0, 1650.0]),
+            (self.hrv_freq, [55.0, 52.0]),
+            (self.hrv_current, [12.5, 11.8]),
+            (self.hrv_rpm, [1650.0, 1560.0]),
+        ]:
+            arr = await arr_node.read_value()
+            arr[0] = round(defaults[0] + random.gauss(0, 0.5), 1)
+            arr[1] = round(defaults[1] + random.gauss(0, 0.5), 1)
+            await arr_node.write_value(arr)
+
+        # VfdTemp and HrvVfdTemp slowly drift
+        for temp_node, base in [(self.vfd_temp, [115.0, 110.0]), (self.hrv_vfd_temp, [105.0, 102.0])]:
+            arr = await temp_node.read_value()
+            arr[0] = round(base[0] + 3.0 * math.sin(t / 200.0) + random.gauss(0, 0.2), 1)
+            arr[1] = round(base[1] + 3.0 * math.sin(t / 200.0 + 1.0) + random.gauss(0, 0.2), 1)
+            await temp_node.write_value(arr)
+
+        # ── 5. Power & Energy ────────────────────────────────────────────────
+        # ActivePower varies sinusoidally 35-50 kW
+        ap = 42.5 + 7.5 * math.sin(t / 45.0) + random.gauss(0, 0.3)
+        ap = round(max(35.0, min(50.0, ap)), 1)
+        await self.active_power.write_value(ap)
+        await self.active_fund_power.write_value(round(ap - 0.8, 1))
+        await self.active_harmonic_power.write_value(round(0.8 + random.gauss(0, 0.05), 2))
+
+        # PowerFactor floats 0.85-0.92
+        pf = 0.885 + 0.035 * math.sin(t / 60.0) + random.gauss(0, 0.005)
+        pf = round(max(0.85, min(0.92, pf)), 3)
+        await self.power_factor.write_value(pf)
+
+        # ApparentPower = ActivePower / PowerFactor
+        app_pwr = round(ap / pf, 1) if pf > 0 else ap
+        await self.apparent_power.write_value(app_pwr)
+
+        # ReactivePower
+        rp = round(math.sqrt(max(0, app_pwr**2 - ap**2)), 1)
+        await self.reactive_power.write_value(rp)
+
+        # RmsCurrent proportional to power (P = V*I*PF, V=480)
+        rms_i = round(ap * 1000 / (480.0 * pf), 1) if pf > 0 else 0.0
+        await self.rms_current.write_value(rms_i)
+        await self.rms_voltage.write_value(round(480.0 + random.gauss(0, 0.5), 1))
+        await self.current_peak.write_value(round(rms_i * 1.414, 1))
+        await self.voltage_peak.write_value(round(480.0 * 1.414 + random.gauss(0, 1.0), 1))
+        await self.mean_phase_angle.write_value(round(math.degrees(math.acos(min(1.0, pf))), 1))
+        await self.voltage_phase_angle.write_value(0.0)
+
+        # Energy accumulators slowly increment
+        incr = ap / 3600.0  # kWh per second tick
+        fae = await self.fwd_active_energy.read_value()
+        await self.fwd_active_energy.write_value(round(fae + incr, 1))
+        fafe = await self.fwd_active_fund_energy.read_value()
+        await self.fwd_active_fund_energy.write_value(round(fafe + incr * 0.99, 1))
+        fahe = await self.fwd_active_harm_energy.read_value()
+        await self.fwd_active_harm_energy.write_value(round(fahe + incr * 0.01, 2))
+        fre = await self.fwd_reactive_energy.read_value()
+        await self.fwd_reactive_energy.write_value(round(fre + rp / 3600.0, 1))
+        ae = await self.apparent_energy.read_value()
+        await self.apparent_energy.write_value(round(ae + app_pwr / 3600.0, 1))
+
+        # ── 6. Totals ────────────────────────────────────────────────────────
+        # Increment by 1 each minute (60 ticks at 1s interval)
+        if self._tick % 60 == 0:
+            trt = await self.total_run_time.read_value()
+            await self.total_run_time.write_value(trt + 1)
+            frt = await self.fan_rt.read_value()
+            await self.fan_rt.write_value(frt + 1)
+            tho = await self.tot_heat_on.read_value()
+            await self.tot_heat_on.write_value(tho + 1)
+            tvo = await self.tot_vent_on.read_value()
+            await self.tot_vent_on.write_value(tvo + 1)
+        if self._tick % 120 == 0:
+            tro = await self.tot_refrig_on.read_value()
+            await self.tot_refrig_on.write_value(tro + 1)
+
+        # ── 7. Demand Response ───────────────────────────────────────────────
+        await self.current_demand.write_value(ap)
+        dr_en = await self.dr_enabled.read_value()
+        if dr_en:
+            limit = await self.demand_limit.read_value()
+            shed = max(0.0, round(ap - limit, 1))
+            shed_pct = round(shed / ap * 100, 1) if ap > 0 else 0.0
+            await self.demand_shed.write_value(shed)
+            await self.demand_shed_pct.write_value(shed_pct)
+        else:
+            await self.demand_shed.write_value(0.0)
+            await self.demand_shed_pct.write_value(0.0)
+
+        # ── 8. Misc ──────────────────────────────────────────────────────────
+        await self.one_sec_pulse.write_value(bool(self._tick % 2))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Opto22 groov RIO — CODESYS 3.5 OPC-UA Server
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -686,6 +1108,10 @@ class Opto22GroovDevice:
         self.pid_lim_hi  = await add_var(fb_pid, ns, "xLimitHigh",  False)
         self.pid_lim_lo  = await add_var(fb_pid, ns, "xLimitLow",   False)
 
+        # ── Kiln Controller ──────────────────────────────────────────────────
+        self._kiln = KilnTags()
+        await self._kiln.build(device_set, ns)
+
         log.info("  [groov RIO / CODESYS 3.5] Node tree built — DeviceSet hierarchy, "
                  "2 Tasks, 3 GVLs (8 AI, 4 AO, 16 DI, 8 DO), PLC_PRG + FB_PID_Inst")
 
@@ -759,6 +1185,8 @@ class Opto22GroovDevice:
             await self.alarm_act.write_value(False)
             await self.alarm_code.write_value(0)
             await self.alarm_text.write_value("")
+
+        await self._kiln.update()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -877,6 +1305,10 @@ class SiemensS71200Device:
         await add_var(plc, ns, "LED_STOP",     False)
         await add_var(plc, ns, "LED_ERROR",    False)
 
+        # ── Kiln Controller ──────────────────────────────────────────────────
+        self._kiln = KilnTags()
+        await self._kiln.build(dev, ns)
+
         log.info("  [S7-1200] Node tree built — 2 DBs, 8 DI/DO, timers, counters")
 
     async def update(self):
@@ -945,6 +1377,8 @@ class SiemensS71200Device:
 
         # ── Run hours ─────────────────────────────────────────────────────────
         await self.run_hours.write_value(round(t / 3600, 4))
+
+        await self._kiln.update()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1067,6 +1501,10 @@ class UnitronicsDevice:
         await add_var(plc, ns, "BatteryOK",    True)
         await add_var(plc, ns, "SDCardOK",     True)
 
+        # ── Kiln Controller ──────────────────────────────────────────────────
+        self._kiln = KilnTags()
+        await self._kiln.build(dev, ns)
+
         log.info("  [Unitronics] Node tree built — MIs, MLs, MBs, 6 AI, 2 AO, 16 DI, 8 DO, DTs")
 
     async def update(self):
@@ -1123,6 +1561,8 @@ class UnitronicsDevice:
 
         # ── Scan Time ─────────────────────────────────────────────────────────
         await self.scan_time.write_value(round(2.4 + random.gauss(0, 0.1), 2))
+
+        await self._kiln.update()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
