@@ -12,14 +12,482 @@ Usage:    python3 opcua_sim.py [--port 4840] [--host 0.0.0.0]
 
 import asyncio
 import argparse
+import ipaddress
+import json
 import math
+import os
 import random
+import subprocess
 import time
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
 from asyncua import Server, ua
 from asyncua.common.node import Node
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Config
+# ──────────────────────────────────────────────────────────────────────────────
+CONFIG_PATH = Path(__file__).resolve().parent / "opcua_sim_config.json"
+
+DEVICE_TYPES = {
+    "1": ("opto22",     "Opto22 groov RIO (CODESYS 3.5)"),
+    "2": ("siemens",    "Siemens S7-1200"),
+    "3": ("unitronics", "Unitronics UniStream/Vision PLC"),
+}
+
+DEVICE_CLASSES = {
+    "opto22":     lambda: Opto22GroovDevice,
+    "siemens":    lambda: SiemensS71200Device,
+    "unitronics": lambda: UnitronicsDevice,
+}
+
+
+def load_config():
+    """Load config from disk, return dict or None if not found."""
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            log.warning(f"Failed to load config: {exc}")
+    return None
+
+
+def save_config(cfg: dict):
+    """Persist config to disk."""
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(cfg, f, indent=2)
+    log.info(f"Config saved to {CONFIG_PATH}")
+
+
+def _get_default_interface():
+    """Return the name of the default network interface (prefer one with an IPv4 address)."""
+    ifaces = _list_interfaces()
+    # Prefer an interface that already has an IP
+    for name, addr in ifaces:
+        if addr:
+            return name
+    # Fall back to first non-loopback interface
+    if ifaces:
+        return ifaces[0][0]
+    return None
+
+
+def _list_interfaces():
+    """Return list of (iface_name, ipv4_addr_or_None) for non-loopback interfaces."""
+    # Collect IPv4 addresses keyed by interface name
+    ip_map = {}
+    try:
+        result = subprocess.run(
+            ["ip", "-4", "-o", "addr", "show"],
+            capture_output=True, text=True, check=True,
+        )
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            iface = parts[1]
+            addr = parts[3].split("/")[0]
+            if iface != "lo":
+                ip_map[iface] = addr
+    except (subprocess.CalledProcessError, IndexError):
+        pass
+
+    # List all non-loopback interfaces (including those without an IPv4 address)
+    ifaces = []
+    try:
+        result = subprocess.run(
+            ["ip", "-o", "link", "show"],
+            capture_output=True, text=True, check=True,
+        )
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            # Format: "N: iface_name: ..."  — strip trailing colon
+            iface = parts[1].rstrip(":")
+            if iface != "lo":
+                ifaces.append((iface, ip_map.get(iface)))
+    except (subprocess.CalledProcessError, IndexError):
+        pass
+    return ifaces
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ANSI Color helpers
+# ──────────────────────────────────────────────────────────────────────────────
+class _C:
+    """ANSI color codes for the TUI."""
+    RESET   = "\033[0m"
+    BOLD    = "\033[1m"
+    DIM     = "\033[2m"
+    # Foreground
+    RED     = "\033[31m"
+    GREEN   = "\033[32m"
+    YELLOW  = "\033[33m"
+    BLUE    = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN    = "\033[36m"
+    WHITE   = "\033[37m"
+    # Bright
+    BRED    = "\033[91m"
+    BGREEN  = "\033[92m"
+    BYELLOW = "\033[93m"
+    BCYAN   = "\033[96m"
+    BWHITE  = "\033[97m"
+
+    @staticmethod
+    def supported():
+        """Check if the terminal likely supports color."""
+        return os.environ.get("TERM", "") != "dumb" and hasattr(os, "isatty") and os.isatty(1)
+
+# Disable colors if terminal doesn't support them
+if not _C.supported():
+    for attr in dir(_C):
+        if attr.isupper() and not attr.startswith("_"):
+            setattr(_C, attr, "")
+
+
+def _clear_screen():
+    os.system("cls" if os.name == "nt" else "clear")
+
+
+def _get_interface_ip(iface_name):
+    """Return the IPv4 address for a given interface name, or None."""
+    ifaces = _list_interfaces()
+    for name, addr in ifaces:
+        if name == iface_name:
+            return addr
+    return None
+
+
+def _pick_interface():
+    """Show interface picker, return (iface_name, iface_ip_or_None)."""
+    ifaces = _list_interfaces()
+    default_iface = _get_default_interface()
+
+    if ifaces:
+        print(f"\n  {_C.CYAN}{_C.BOLD}Available interfaces:{_C.RESET}")
+        for i, (name, addr) in enumerate(ifaces, 1):
+            marker = f" {_C.BYELLOW}← default{_C.RESET}" if name == default_iface else ""
+            if addr:
+                print(f"    {_C.BWHITE}{i}.{_C.RESET} {_C.GREEN}{name}{_C.RESET} ({_C.BCYAN}{addr}{_C.RESET}){marker}")
+            else:
+                print(f"    {_C.BWHITE}{i}.{_C.RESET} {_C.GREEN}{name}{_C.RESET} {_C.DIM}(no IP){_C.RESET}{marker}")
+        print()
+
+    while True:
+        prompt = f"  {_C.BWHITE}Interface"
+        if default_iface:
+            prompt += f" [{_C.GREEN}{default_iface}{_C.BWHITE}]"
+        prompt += f": {_C.RESET}"
+        iface_input = input(prompt).strip()
+
+        if not iface_input and default_iface:
+            return default_iface, _get_interface_ip(default_iface)
+        elif iface_input.isdigit() and ifaces:
+            idx = int(iface_input) - 1
+            if 0 <= idx < len(ifaces):
+                name = ifaces[idx][0]
+                return name, ifaces[idx][1]
+        elif iface_input:
+            return iface_input, _get_interface_ip(iface_input)
+        print(f"  {_C.RED}Enter an interface name or number.{_C.RESET}")
+
+
+def _device_summary(devices):
+    """Return a human-readable summary of device list."""
+    counts = {}
+    for d in devices:
+        counts[d["type"]] = counts.get(d["type"], 0) + 1
+    type_names = {tid: desc for _, (tid, desc) in DEVICE_TYPES.items()}
+    parts = [f"{v}x {type_names.get(k, k)}" for k, v in counts.items()]
+    return f"{len(devices)} total — {', '.join(parts)}"
+
+
+def _print_banner():
+    _clear_screen()
+    print(f"\n  {_C.BCYAN}{_C.BOLD}╔══════════════════════════════════════════════════════╗{_C.RESET}")
+    print(f"  {_C.BCYAN}{_C.BOLD}║{_C.RESET}     {_C.BWHITE}{_C.BOLD}OPC-UA Device Simulator — Configuration{_C.RESET}     {_C.BCYAN}{_C.BOLD}║{_C.RESET}")
+    print(f"  {_C.BCYAN}{_C.BOLD}╚══════════════════════════════════════════════════════╝{_C.RESET}")
+
+
+def _print_menu(cfg):
+    """Print the main persistent menu with current config values."""
+    devices = cfg.get("devices", [{"type": "siemens"}])
+    mode = cfg.get("mode", "same_ip")
+    host = cfg.get("host", "0.0.0.0")
+    start_ip = cfg.get("start_ip", host)
+    port = cfg.get("port", 4840)
+    interval = cfg.get("interval", 1.0)
+    interface = cfg.get("interface")
+
+    dev_str = _device_summary(devices)
+    mode_str = "Same IP (one endpoint)" if mode == "same_ip" else "IP Range (one server per IP)"
+
+    if mode == "same_ip":
+        host_str = f"{host}:{port}"
+        if interface:
+            host_str += f"  (iface: {interface})"
+    else:
+        end_ip = str(ipaddress.ip_address(int(ipaddress.ip_address(start_ip)) + len(devices) - 1))
+        host_str = f"{start_ip} → {end_ip}  port {port}"
+        if interface:
+            host_str += f"  (iface: {interface})"
+
+    print(f"\n  {_C.DIM}{'─' * 54}{_C.RESET}")
+    print(f"  {_C.BYELLOW}{_C.BOLD}1.{_C.RESET} {_C.BWHITE}Device selection{_C.RESET}   {_C.GREEN}{dev_str}{_C.RESET}")
+    print(f"  {_C.BYELLOW}{_C.BOLD}2.{_C.RESET} {_C.BWHITE}Network mode{_C.RESET}      {_C.GREEN}{mode_str}{_C.RESET}")
+    print(f"  {_C.BYELLOW}{_C.BOLD}3.{_C.RESET} {_C.BWHITE}Host / IP range{_C.RESET}   {_C.GREEN}{host_str}{_C.RESET}")
+    print(f"  {_C.BYELLOW}{_C.BOLD}4.{_C.RESET} {_C.BWHITE}Port{_C.RESET}              {_C.GREEN}{port}{_C.RESET}")
+    print(f"  {_C.BYELLOW}{_C.BOLD}5.{_C.RESET} {_C.BWHITE}Update interval{_C.RESET}   {_C.GREEN}{interval}s{_C.RESET}")
+    print(f"  {_C.DIM}{'─' * 54}{_C.RESET}")
+    print(f"  {_C.BGREEN}{_C.BOLD}R.{_C.RESET} {_C.BGREEN}Run{_C.RESET}               {_C.BRED}{_C.BOLD}Q.{_C.RESET} {_C.BRED}Quit{_C.RESET}")
+    print(f"  {_C.DIM}{'─' * 54}{_C.RESET}")
+
+
+def _edit_devices(cfg):
+    """Edit device selection in-place."""
+    print(f"\n  {_C.CYAN}{_C.BOLD}── Device Selection ──{_C.RESET}")
+    print(f"    {_C.BWHITE}1.{_C.RESET} All same type   — one device type, choose how many")
+    print(f"    {_C.BWHITE}2.{_C.RESET} Mixed types     — pick count for each type")
+    while True:
+        choice = input(f"  {_C.BWHITE}Select option (1/2) [{_C.GREEN}1{_C.BWHITE}]: {_C.RESET}").strip()
+        if choice in ("1", "2", ""):
+            break
+        print(f"  {_C.RED}Enter 1 or 2.{_C.RESET}")
+
+    if choice == "2":
+        cfg["devices"] = _input_devices_mixed()
+    else:
+        cfg["devices"] = _input_devices_same()
+
+
+def _input_devices_same():
+    """All-same-type flow."""
+    print(f"\n  {_C.CYAN}{_C.BOLD}── Device Type ──{_C.RESET}")
+    for key, (_, desc) in DEVICE_TYPES.items():
+        print(f"    {_C.BWHITE}{key}.{_C.RESET} {desc}")
+    while True:
+        type_choice = input(f"  {_C.BWHITE}Select type (1/2/3) [{_C.GREEN}2{_C.BWHITE}]: {_C.RESET}").strip()
+        if not type_choice:
+            type_choice = "2"
+        if type_choice in DEVICE_TYPES:
+            break
+        print(f"  {_C.RED}Enter 1, 2, or 3.{_C.RESET}")
+
+    type_id, desc = DEVICE_TYPES[type_choice]
+    total = _input_total_plcs()
+    devices = [{"type": type_id} for _ in range(total)]
+    print(f"\n  {_C.GREEN}✓ Selected: {total}x {desc}{_C.RESET}")
+    return devices
+
+
+def _input_devices_mixed():
+    """Mixed-type flow."""
+    total = _input_total_plcs()
+
+    print(f"\n  {_C.CYAN}{_C.BOLD}── Allocate by Type ──{_C.RESET}")
+    for key, (_, desc) in DEVICE_TYPES.items():
+        print(f"    {_C.BWHITE}{key}.{_C.RESET} {desc}")
+
+    devices = []
+    remaining = total
+    type_keys = list(DEVICE_TYPES.keys())
+
+    for i, key in enumerate(type_keys):
+        type_id, desc = DEVICE_TYPES[key]
+        is_last = (i == len(type_keys) - 1)
+
+        if remaining <= 0:
+            break
+
+        if is_last:
+            count = remaining
+            print(f"\n  {desc}: {_C.BYELLOW}{count}{_C.RESET} (remaining)")
+        else:
+            while True:
+                count_str = input(f"\n  {_C.BWHITE}How many {desc}? (0-{remaining}) [{_C.GREEN}0{_C.BWHITE}]: {_C.RESET}").strip()
+                if not count_str:
+                    count = 0
+                    break
+                try:
+                    count = int(count_str)
+                    if 0 <= count <= remaining:
+                        break
+                    print(f"  {_C.RED}Must be between 0 and {remaining}.{_C.RESET}")
+                except ValueError:
+                    print(f"  {_C.RED}Enter a number.{_C.RESET}")
+
+        for _ in range(count):
+            devices.append({"type": type_id})
+        remaining -= count
+
+    print(f"\n  {_C.GREEN}✓ Selected: {_device_summary(devices)}{_C.RESET}")
+    return devices
+
+
+def _input_total_plcs():
+    """Prompt for total PLC count (1-12)."""
+    while True:
+        total_str = input(f"  {_C.BWHITE}Total number of PLCs (1-12) [{_C.GREEN}1{_C.BWHITE}]: {_C.RESET}").strip()
+        if not total_str:
+            return 1
+        try:
+            total = int(total_str)
+            if 1 <= total <= 12:
+                return total
+            print(f"  {_C.RED}Must be between 1 and 12.{_C.RESET}")
+        except ValueError:
+            print(f"  {_C.RED}Enter a number.{_C.RESET}")
+
+
+def _edit_network_mode(cfg):
+    """Edit network mode in-place."""
+    print(f"\n  {_C.CYAN}{_C.BOLD}── Network Mode ──{_C.RESET}")
+    print(f"    {_C.BWHITE}1.{_C.RESET} Same IP     — all devices on one server endpoint")
+    print(f"    {_C.BWHITE}2.{_C.RESET} IP Range    — each device on its own IP address")
+    while True:
+        choice = input(f"  {_C.BWHITE}Select mode (1/2): {_C.RESET}").strip()
+        if choice in ("1", "2"):
+            break
+        print(f"  {_C.RED}Enter 1 or 2.{_C.RESET}")
+
+    new_mode = "ip_range" if choice == "2" else "same_ip"
+    old_mode = cfg.get("mode")
+    cfg["mode"] = new_mode
+
+    # When switching modes, reconfigure host/IP to match
+    if new_mode != old_mode:
+        _edit_host_ip(cfg)
+
+
+def _edit_host_ip(cfg):
+    """Edit host / IP range in-place. Both modes pick an interface first."""
+    mode = cfg.get("mode", "same_ip")
+
+    if mode == "ip_range":
+        print(f"\n  {_C.CYAN}{_C.BOLD}── IP Range Configuration ──{_C.RESET}")
+        print(f"  {_C.DIM}Each device gets its own IP. Virtual IPs are added to the interface.{_C.RESET}\n")
+
+        iface, iface_ip = _pick_interface()
+        cfg["interface"] = iface
+
+        num_devices = len(cfg.get("devices", [{"type": "siemens"}]))
+        default_ip = iface_ip or ""
+        end_note = f" (need {num_devices} IPs)" if num_devices > 1 else ""
+
+        while True:
+            prompt = f"  {_C.BWHITE}Start IP address{end_note}"
+            if default_ip:
+                prompt += f" [{_C.GREEN}{default_ip}{_C.BWHITE}]"
+            prompt += f": {_C.RESET}"
+            start_ip = input(prompt).strip()
+            if not start_ip and default_ip:
+                start_ip = default_ip
+            try:
+                addr = ipaddress.ip_address(start_ip)
+                if addr.is_loopback:
+                    print(f"  {_C.RED}Loopback addresses not supported. Use a real subnet.{_C.RESET}")
+                    continue
+                end_addr = ipaddress.ip_address(int(addr) + num_devices - 1)
+                if int(end_addr) > int(ipaddress.ip_address("255.255.255.254")):
+                    print(f"  {_C.RED}IP range {start_ip} → {end_addr} is not valid.{_C.RESET}")
+                    continue
+                break
+            except ValueError:
+                print(f"  {_C.RED}Invalid IP address.{_C.RESET}")
+
+        cfg["start_ip"] = start_ip
+        cfg["host"] = "0.0.0.0"
+        end_ip = str(ipaddress.ip_address(int(addr) + num_devices - 1))
+        print(f"\n  {_C.GREEN}✓ Will bind {num_devices} IPs: {start_ip} → {end_ip} on {iface}{_C.RESET}")
+    else:
+        print(f"\n  {_C.CYAN}{_C.BOLD}── Bind Host ──{_C.RESET}")
+        print(f"  {_C.DIM}Select which interface to bind to.{_C.RESET}")
+
+        iface, iface_ip = _pick_interface()
+        cfg["interface"] = iface
+
+        default_host = iface_ip or "0.0.0.0"
+        host = input(f"  {_C.BWHITE}Bind host [{_C.GREEN}{default_host}{_C.BWHITE}]: {_C.RESET}").strip()
+        if not host:
+            host = default_host
+        cfg["host"] = host
+        cfg["start_ip"] = host
+        print(f"\n  {_C.GREEN}✓ Host set to {host} (iface: {iface}){_C.RESET}")
+
+
+def _edit_port(cfg):
+    """Edit port in-place."""
+    print(f"\n  {_C.CYAN}{_C.BOLD}── Port ──{_C.RESET}")
+    current = cfg.get("port", 4840)
+    port_str = input(f"  {_C.BWHITE}OPC-UA port [{_C.GREEN}{current}{_C.BWHITE}]: {_C.RESET}").strip()
+    if port_str.isdigit():
+        cfg["port"] = int(port_str)
+    print(f"  {_C.GREEN}✓ Port: {cfg['port']}{_C.RESET}")
+
+
+def _edit_interval(cfg):
+    """Edit update interval in-place."""
+    print(f"\n  {_C.CYAN}{_C.BOLD}── Update Interval ──{_C.RESET}")
+    current = cfg.get("interval", 1.0)
+    interval_str = input(f"  {_C.BWHITE}Interval in seconds [{_C.GREEN}{current}{_C.BWHITE}]: {_C.RESET}").strip()
+    try:
+        if interval_str:
+            cfg["interval"] = float(interval_str)
+    except ValueError:
+        pass
+    print(f"  {_C.GREEN}✓ Interval: {cfg['interval']}s{_C.RESET}")
+
+
+def show_menu():
+    """Interactive TUI menu. Returns a config dict or None to quit."""
+    # Start with saved config or sensible defaults
+    existing = load_config()
+    if existing:
+        cfg = existing
+    else:
+        # Default: detect interface IP for host
+        default_iface = _get_default_interface()
+        default_ip = _get_interface_ip(default_iface) if default_iface else "0.0.0.0"
+        cfg = {
+            "devices": [{"type": "siemens"}],
+            "mode": "same_ip",
+            "host": default_ip or "0.0.0.0",
+            "start_ip": default_ip or "0.0.0.0",
+            "port": 4840,
+            "interval": 1.0,
+        }
+        if default_iface:
+            cfg["interface"] = default_iface
+
+    while True:
+        _print_banner()
+        _print_menu(cfg)
+
+        choice = input(f"\n  {_C.BWHITE}{_C.BOLD}Select option: {_C.RESET}").strip().upper()
+
+        if choice == "1":
+            _edit_devices(cfg)
+        elif choice == "2":
+            _edit_network_mode(cfg)
+        elif choice == "3":
+            _edit_host_ip(cfg)
+        elif choice == "4":
+            _edit_port(cfg)
+        elif choice == "5":
+            _edit_interval(cfg)
+        elif choice == "R":
+            save_config(cfg)
+            return cfg
+        elif choice == "Q":
+            return None
+        else:
+            print(f"  {_C.RED}Invalid choice. Enter 1-5, R, or Q.{_C.RESET}")
+            input(f"  {_C.DIM}Press Enter to continue…{_C.RESET}")
+            continue
+
+        if choice in ("1", "2", "3", "4", "5"):
+            input(f"\n  {_C.DIM}Press Enter to return to menu…{_C.RESET}")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Logging
@@ -119,10 +587,11 @@ class Opto22GroovDevice:
         self._di_states  = [False] * 16
         self._alarm_cnt  = 0
 
-    async def build(self, server: Server, ns: int, root: Node):
+    async def build(self, server: Server, ns: int, root: Node, instance: int = 1):
         # ── DeviceSet container (CODESYS convention) ─────────────────────────
-        device_set = await add_folder(root,       ns, "DeviceSet")
-        dev        = await add_object(device_set, ns, "groov-RIO-001")
+        suffix = f"-{instance:03d}"
+        device_set = await add_folder(root,       ns, f"DeviceSet{suffix}")
+        dev        = await add_object(device_set, ns, f"groov-RIO{suffix}")
 
         # ── ServerInfo ───────────────────────────────────────────────────────
         sinfo = await add_folder(dev, ns, "ServerInfo")
@@ -333,8 +802,8 @@ class SiemensS71200Device:
         self._c1_val    = 0
         self._c2_val    = 0
 
-    async def build(self, server: Server, ns: int, root: Node):
-        dev = await add_object(root, ns, "Siemens_S7_1200")
+    async def build(self, server: Server, ns: int, root: Node, instance: int = 1):
+        dev = await add_object(root, ns, f"Siemens_S7_1200_{instance:03d}")
 
         # ── Device Info ──────────────────────────────────────────────────────
         info = await add_folder(dev, ns, "DeviceInfo")
@@ -516,8 +985,8 @@ class UnitronicsDevice:
         self._start  = time.time()
         self._alarm_count = 0
 
-    async def build(self, server: Server, ns: int, root: Node):
-        dev = await add_object(root, ns, "Unitronics_PLC")
+    async def build(self, server: Server, ns: int, root: Node, instance: int = 1):
+        dev = await add_object(root, ns, f"Unitronics_PLC_{instance:03d}")
 
         # ── Device Info ──────────────────────────────────────────────────────
         info = await add_folder(dev, ns, "DeviceInfo")
@@ -660,48 +1129,230 @@ class UnitronicsDevice:
 # Server Bootstrap
 # ──────────────────────────────────────────────────────────────────────────────
 
-async def run_server(host: str, port: int, update_interval: float):
+def _make_devices(device_configs: list):
+    """Instantiate device objects from config list.  Returns list of (device, type_name, instance_num)."""
+    counters = {}
+    devices = []
+    for entry in device_configs:
+        dtype = entry["type"]
+        counters[dtype] = counters.get(dtype, 0) + 1
+        cls = DEVICE_CLASSES[dtype]()
+        devices.append((cls(), dtype, counters[dtype]))
+    return devices
+
+
+def _get_session_count(server):
+    """Return the number of active OPC-UA client sessions on a server."""
+    try:
+        isession_mgr = getattr(server, "iserver", None)
+        if isession_mgr is None:
+            return 0
+        session_mgr = getattr(isession_mgr, "session_manager", None)
+        if session_mgr is None:
+            return 0
+        active = getattr(session_mgr, "active_sessions", None)
+        if active is None:
+            return 0
+        return len(active)
+    except Exception:
+        return 0
+
+
+async def _shutdown_guard(servers):
+    """Check if any server has connected clients. Returns True if safe to stop."""
+    if not isinstance(servers, (list, tuple)):
+        servers = [servers]
+    total = sum(_get_session_count(s) for s in servers)
+    if total > 0:
+        print(f"\n  {_C.BYELLOW}{_C.BOLD}⚠  {total} client(s) still connected.{_C.RESET}")
+        try:
+            ans = input(f"  {_C.BWHITE}Force stop? (y/N): {_C.RESET}").strip().upper()
+        except (EOFError, KeyboardInterrupt):
+            ans = "Y"
+        return ans == "Y"
+    return True
+
+
+async def run_single_server(host: str, port: int, update_interval: float, device_configs: list):
+    """All devices on one server endpoint (same_ip mode)."""
     server = Server()
     await server.init()
 
     endpoint = f"opc.tcp://{host}:{port}/opcua/sim"
     server.set_endpoint(endpoint)
     server.set_server_name("OPC-UA Industrial Device Simulator")
-
-    # Security: None/Anonymous for lab use — enable policies as needed
     server.set_security_IDs(["Anonymous"])
 
-    # Register a single application namespace for all simulated devices
     ns = await server.register_namespace("urn:nyle:opcua:simulator")
-
     root = server.nodes.objects
 
-    # Instantiate devices
-    opto    = Opto22GroovDevice()
-    siemens = SiemensS71200Device()
-    uni     = UnitronicsDevice()
-
+    devices = _make_devices(device_configs)
     log.info("Building OPC-UA node trees…")
-    await opto.build(server, ns, root)
-    await siemens.build(server, ns, root)
-    await uni.build(server, ns, root)
+    for dev, dtype, inst in devices:
+        await dev.build(server, ns, root, instance=inst)
+
+    dev_summary = {}
+    for _, dtype, _ in devices:
+        dev_summary[dtype] = dev_summary.get(dtype, 0) + 1
+    parts = [f"{v}x {k}" for k, v in dev_summary.items()]
 
     log.info(f"\n{'='*60}")
     log.info(f"  OPC-UA Simulator running at: {endpoint}")
     log.info(f"  Namespace index : {ns}")
     log.info(f"  Update interval : {update_interval}s")
-    log.info(f"  Devices         : Opto22 groov RIO | Siemens S7-1200 | Unitronics PLC")
+    log.info(f"  Devices ({len(devices)}): {', '.join(parts)}")
     log.info(f"{'='*60}\n")
 
     async with server:
-        while True:
+        stop_requested = False
+        while not stop_requested:
             try:
-                await opto.update()
-                await siemens.update()
-                await uni.update()
+                for dev, _, _ in devices:
+                    await dev.update()
+            except asyncio.CancelledError:
+                break
             except Exception as exc:
                 log.warning(f"Update error (will retry): {exc}")
-            await asyncio.sleep(update_interval)
+            try:
+                await asyncio.sleep(update_interval)
+            except asyncio.CancelledError:
+                if await _shutdown_guard(server):
+                    break
+                # Client said no — keep running
+                log.info("Continuing… (clients still connected)")
+
+
+def _add_virtual_ips(interface: str, start_ip: str, count: int, prefix_len: int = 24):
+    """Add virtual IP addresses to a network interface. Returns list of IPs added."""
+    base = int(ipaddress.ip_address(start_ip))
+    added_ips = []
+    for i in range(count):
+        ip = str(ipaddress.ip_address(base + i))
+        cmd = ["sudo", "ip", "addr", "add", f"{ip}/{prefix_len}", "dev", interface]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                added_ips.append(ip)
+                log.info(f"  Added {ip}/{prefix_len} to {interface}")
+            elif "File exists" in result.stderr or "already assigned" in result.stderr:
+                # IP already assigned — still usable
+                added_ips.append(ip)
+                log.info(f"  {ip}/{prefix_len} already on {interface}")
+            else:
+                log.error(f"  Failed to add {ip}/{prefix_len}: {result.stderr.strip()}")
+        except OSError as exc:
+            log.error(f"  Failed to run ip command: {exc}")
+    return added_ips
+
+
+def _remove_virtual_ips(interface: str, ips: list, prefix_len: int = 24):
+    """Remove virtual IP addresses from a network interface."""
+    for ip in ips:
+        cmd = ["sudo", "ip", "addr", "del", f"{ip}/{prefix_len}", "dev", interface]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                log.info(f"  Removed {ip}/{prefix_len} from {interface}")
+            else:
+                log.warning(f"  Could not remove {ip}: {result.stderr.strip()}")
+        except OSError:
+            pass
+
+
+async def run_ip_range_server(start_ip: str, port: int, update_interval: float,
+                              device_configs: list, interface: str = None):
+    """Each device on its own IP address (ip_range mode).
+    Creates virtual IPs on the specified interface and cleans up on exit."""
+    if not interface:
+        raise RuntimeError("IP range mode requires an interface name. "
+                           "Re-run the menu to configure one.")
+
+    base = int(ipaddress.ip_address(start_ip))
+    count = len(device_configs)
+
+    # Add virtual IPs to the interface
+    log.info(f"Setting up {count} virtual IPs on {interface}…")
+    added_ips = _add_virtual_ips(interface, start_ip, count)
+    if len(added_ips) != count:
+        log.error(f"Only {len(added_ips)}/{count} IPs were added. "
+                  "Check permissions (may need sudo) and interface name.")
+        if not added_ips:
+            _remove_virtual_ips(interface, added_ips)
+            raise RuntimeError("No IPs could be added. Cannot start IP range mode.")
+
+    devices_with_servers = []
+    try:
+        for i, entry in enumerate(device_configs):
+            ip = str(ipaddress.ip_address(base + i))
+            dtype = entry["type"]
+
+            server = Server()
+            await server.init()
+            endpoint = f"opc.tcp://{ip}:{port}/opcua/sim"
+            server.set_endpoint(endpoint)
+            server.set_server_name(f"OPC-UA Simulator — {dtype} #{i+1}")
+            server.set_security_IDs(["Anonymous"])
+
+            ns = await server.register_namespace("urn:nyle:opcua:simulator")
+            root = server.nodes.objects
+
+            cls = DEVICE_CLASSES[dtype]()
+            dev = cls()
+            await dev.build(server, ns, root, instance=i + 1)
+
+            devices_with_servers.append((server, dev, ip, dtype))
+            log.info(f"  [{dtype} #{i+1}] → {endpoint}")
+
+        log.info(f"\n{'='*60}")
+        log.info(f"  OPC-UA Simulator — IP Range Mode")
+        log.info(f"  {len(devices_with_servers)} servers on {start_ip} … "
+                 f"{str(ipaddress.ip_address(base + count - 1))}:{port}")
+        log.info(f"  Interface       : {interface}")
+        log.info(f"  Update interval : {update_interval}s")
+        log.info(f"{'='*60}\n")
+
+        # Start all servers
+        contexts = []
+        for srv, _, _, _ in devices_with_servers:
+            ctx = srv.__aenter__()
+            await ctx
+            contexts.append(srv)
+
+        try:
+            stop_requested = False
+            while not stop_requested:
+                try:
+                    for _, dev, _, _ in devices_with_servers:
+                        await dev.update()
+                except asyncio.CancelledError:
+                    break
+                except Exception as exc:
+                    log.warning(f"Update error (will retry): {exc}")
+                try:
+                    await asyncio.sleep(update_interval)
+                except asyncio.CancelledError:
+                    all_servers = [s for s, _, _, _ in devices_with_servers]
+                    if await _shutdown_guard(all_servers):
+                        break
+                    log.info("Continuing… (clients still connected)")
+        finally:
+            for srv in contexts:
+                await srv.__aexit__(None, None, None)
+    finally:
+        # Always clean up virtual IPs
+        log.info("Cleaning up virtual IPs…")
+        _remove_virtual_ips(interface, added_ips)
+
+
+async def run_from_config(cfg: dict):
+    """Dispatch to the right server mode based on config."""
+    if cfg["mode"] == "ip_range":
+        await run_ip_range_server(
+            cfg["start_ip"], cfg["port"], cfg["interval"],
+            cfg["devices"], interface=cfg.get("interface"),
+        )
+    else:
+        await run_single_server(cfg["host"], cfg["port"], cfg["interval"], cfg["devices"])
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -715,12 +1366,46 @@ def main():
     parser.add_argument("--host",     default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
     parser.add_argument("--port",     type=int, default=4840, help="OPC-UA port (default: 4840)")
     parser.add_argument("--interval", type=float, default=1.0, help="Update interval in seconds (default: 1.0)")
+    parser.add_argument("--no-menu",  action="store_true", help="Skip menu, use saved config or defaults")
     args = parser.parse_args()
 
-    try:
-        asyncio.run(run_server(args.host, args.port, args.interval))
-    except KeyboardInterrupt:
-        log.info("Simulator stopped.")
+    if args.no_menu:
+        cfg = load_config()
+        if not cfg:
+            cfg = {
+                "devices": [{"type": "opto22"}, {"type": "siemens"}, {"type": "unitronics"}],
+                "mode": "same_ip",
+                "host": args.host,
+                "start_ip": args.host,
+                "port": args.port,
+                "interval": args.interval,
+            }
+        try:
+            asyncio.run(run_from_config(cfg))
+        except KeyboardInterrupt:
+            log.info("Simulator stopped.")
+        return
+
+    # Interactive menu mode — Ctrl+C during server returns to menu
+    while True:
+        try:
+            cfg = show_menu()
+        except KeyboardInterrupt:
+            print("\n")
+            log.info("Exiting.")
+            break
+
+        if cfg is None:
+            # User chose Quit
+            log.info("Exiting.")
+            break
+
+        try:
+            asyncio.run(run_from_config(cfg))
+        except KeyboardInterrupt:
+            print("\n")
+            log.info("Server stopped. Returning to menu…")
+            continue
 
 
 if __name__ == "__main__":
