@@ -44,12 +44,34 @@ Everything lives in `opcua_sim.py`. The server runs at `opc.tcp://HOST:PORT/opcu
 
 Each class has `async build(server, ns, root)` to create the OPC-UA node tree and `async update()` to simulate values each cycle.
 
+**`KilnTags` (shared across all devices):** Every device includes a `KilnController/` folder built by the `KilnTags` class (~140 tags). This models a lumber dry kiln controller with 12 tag groups:
+
+| Group | Tags | Description |
+|---|---|---|
+| UnitIdentification | 12 | Static device info (serial, part number, GPS, site address) |
+| Setpoints | 24 | Writable control setpoints (dry/wet bulb temps, RH, fan/vent/heat modes, deadbands) |
+| TemperaturesSensors | 20 | Fwd/Rev/Ctrl dry bulb, wet bulb, MC, RH, plus 5 aux temps, DLP/SLP/SLT |
+| Commands | 7 | Writable booleans (Start, Stop, Pause, DR enable, schedule skip) |
+| StatusDisplay | 14 | Fan/heat/vent/spray status, alarms, damper %, current step, light stack |
+| Schedule | 5 | Schedule enabled/finished/pause/stop, recipe completion time |
+| ScheduleArrays | 28 | ARRAY[0..40] — step temps, times, modes, ramp, spray, dry cycle, moisture targets |
+| VfdHrv | 19 | ARRAY[0..7] — VFD/HRV freq, current, RPM, temps, faults, status |
+| TotalsRuntime | 5 | Incrementing counters (run time, fan, heat, vent, refrig minutes) |
+| PowerEnergy | 21 | Active/reactive/apparent power, power factor, RMS voltage/current, energy accumulators |
+| DemandResponse | 9 | DR enabled/mode, current demand, shed amount/percent, event status |
+| Misc | 1 | OneSecondPulse toggle |
+
 **Simulation patterns:**
 - Sine waves with Gaussian noise for analog inputs
 - Coupled process loops (tank level ↔ pump/valve/flow)
 - PID controller that reads writable setpoint nodes
 - Timer countdown and counter increment state machines
 - Random digital input toggling and alarm generation
+- Kiln temperatures converge toward writable setpoints with noise
+- Moisture content (MC) decreases over time simulating a drying curve
+- Power varies sinusoidally (35–50 kW) with derived power factor, apparent power, and energy accumulation
+- VFD/HRV motor arrays simulate frequency, current, RPM noise on active drives
+- Runtime counters increment per minute; demand response tracks active power
 
 **Writable nodes** allow clients to set values (setpoints, presets, outputs) that the simulator reads and acts on each update cycle via `node.read_value()`.
 
