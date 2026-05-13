@@ -53,7 +53,7 @@ Each class has `async build(server, ns, root)` to create the OPC-UA node tree an
 | TemperaturesSensors | 20 | Fwd/Rev/Ctrl dry bulb, wet bulb, MC, RH, plus 5 aux temps, DLP/SLP/SLT |
 | Commands | 7 | Writable booleans (Start, Stop, Pause, DR enable, schedule skip) |
 | StatusDisplay | 14 | Fan/heat/vent/spray status, alarms, damper %, current step, light stack |
-| Schedule | 5 | Schedule enabled/finished/pause/stop, recipe completion time |
+| Schedule | 7 | Schedule enabled/finished/pause/stop, recipe completion time, step elapsed/remaining time |
 | ScheduleArrays | 28 | ARRAY[0..40] — step temps, times, modes, ramp, spray, dry cycle, moisture targets |
 | VfdHrv | 19 | ARRAY[0..7] — VFD/HRV freq, current, RPM, temps, faults, status |
 | TotalsRuntime | 5 | Incrementing counters (run time, fan, heat, vent, refrig minutes) |

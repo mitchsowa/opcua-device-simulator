@@ -251,6 +251,7 @@ KilnController/
 ├── Schedule/
 │     ScheduleEnabled (W)  ScheduleFinished  RecipeCompletionTime
 │     ScheduleStop (W)  SchedulePause (W)
+│     StepElapsedTime  StepRemainingTime
 ├── ScheduleArrays/                               (ARRAY[0..40], writable, 5 steps populated)
 │     StepTime  StepMode  StepDbTemp  StepRh  StepMc
 │     StepExhaust  StepIntake  StepFan  StepWbSetpoint  StepPctSetpoint

@@ -636,6 +636,8 @@ class KilnTags:
         self.sched_finished = await add_var(sched, ns, "ScheduleFinished", False)
         self.sched_stop = await add_var(sched, ns, "ScheduleStop", False, writable=True)
         self.sched_pause = await add_var(sched, ns, "SchedulePause", False, writable=True)
+        self.step_elapsed_time = await add_var(sched, ns, "StepElapsedTime", 0)
+        self.step_remaining_time = await add_var(sched, ns, "StepRemainingTime", 300)
 
         # ── Schedule Arrays (ARRAY[0..40], 41 elements each, writable) ───────
         sa = await add_folder(kiln, ns, "ScheduleArrays")
@@ -826,8 +828,12 @@ class KilnTags:
         await self.damper_pct.write_value(damper)
 
         # CurrentStep increments slowly (cycles through 0-4)
-        step = int(t / 300) % 5
+        step_duration = 300
+        step = int(t / step_duration) % 5
         await self.current_step.write_value(step)
+        elapsed_in_step = int(t % step_duration)
+        await self.step_elapsed_time.write_value(elapsed_in_step)
+        await self.step_remaining_time.write_value(step_duration - elapsed_in_step)
 
         # LightStack: 2=Green when running, 3=Yellow if alarm
         alarm1 = await self.alarm_active1.read_value()
