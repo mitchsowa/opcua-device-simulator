@@ -461,14 +461,13 @@ def show_menu():
     if existing:
         cfg = existing
     else:
-        # Default: detect interface IP for host
+        # Default: ip_range mode on 192.168.10.108 → .115 (8 devices on eth0).
         default_iface = _get_default_interface()
-        default_ip = _get_interface_ip(default_iface) if default_iface else "0.0.0.0"
         cfg = {
-            "devices": [{"type": "siemens"}],
-            "mode": "same_ip",
-            "host": default_ip or "0.0.0.0",
-            "start_ip": default_ip or "0.0.0.0",
+            "devices": [{"type": "siemens"}] * 8,
+            "mode": "ip_range",
+            "host": "0.0.0.0",
+            "start_ip": "192.168.10.108",
             "port": 4840,
             "interval": 1.0,
         }
@@ -2309,12 +2308,13 @@ def main():
         cfg = load_config()
         if not cfg:
             cfg = {
-                "devices": [{"type": "opto22"}, {"type": "siemens"}, {"type": "unitronics"}],
-                "mode": "same_ip",
-                "host": args.host,
-                "start_ip": args.host,
+                "devices": [{"type": "siemens"}] * 8,
+                "mode": "ip_range",
+                "host": "0.0.0.0",
+                "start_ip": "192.168.10.108",
                 "port": args.port,
                 "interval": args.interval,
+                "interface": _get_default_interface() or "eth0",
             }
         try:
             asyncio.run(run_from_config(cfg))
