@@ -31,6 +31,17 @@ from asyncua.common.node import Node
 # ──────────────────────────────────────────────────────────────────────────────
 CONFIG_PATH = Path(__file__).resolve().parent / "opcua_sim_config.json"
 
+# Runtime status file — server writes connected-client snapshots here so the
+# menu can show them without IPC. /tmp keeps it world-accessible.
+STATUS_FILE = Path("/tmp/opcua_sim_status.json")
+
+# Systemd service constants
+SERVICE_NAME      = "opcua-sim.service"
+SERVICE_UNIT_PATH = Path("/etc/systemd/system") / SERVICE_NAME
+SERVICE_USER      = "opcua"
+SERVICE_INSTALL_DIR = Path("/opt/opcua-sim")
+FIREWALL_COMMENT  = "opcua-sim"
+
 DEVICE_TYPES = {
     "1": ("opto22",     "Opto22 groov RIO (CODESYS 3.5)"),
     "2": ("siemens",    "Siemens S7-1200"),
@@ -239,6 +250,10 @@ def _print_menu(cfg):
     print(f"  {_C.BYELLOW}{_C.BOLD}3.{_C.RESET} {_C.BWHITE}Host / IP range{_C.RESET}   {_C.GREEN}{host_str}{_C.RESET}")
     print(f"  {_C.BYELLOW}{_C.BOLD}4.{_C.RESET} {_C.BWHITE}Port{_C.RESET}              {_C.GREEN}{port}{_C.RESET}")
     print(f"  {_C.BYELLOW}{_C.BOLD}5.{_C.RESET} {_C.BWHITE}Update interval{_C.RESET}   {_C.GREEN}{interval}s{_C.RESET}")
+    print(f"  {_C.DIM}{'─' * 54}{_C.RESET}")
+    print(f"  {_C.BCYAN}{_C.BOLD}S.{_C.RESET} {_C.BWHITE}Service{_C.RESET}           {_C.DIM}install / remove / start / stop / restart{_C.RESET}")
+    print(f"  {_C.BCYAN}{_C.BOLD}F.{_C.RESET} {_C.BWHITE}Firewall (ufw){_C.RESET}    {_C.DIM}open / close port {port}/tcp{_C.RESET}")
+    print(f"  {_C.BCYAN}{_C.BOLD}C.{_C.RESET} {_C.BWHITE}Connected clients{_C.RESET} {_C.DIM}show who's connected to each PLC{_C.RESET}")
     print(f"  {_C.DIM}{'─' * 54}{_C.RESET}")
     print(f"  {_C.BGREEN}{_C.BOLD}R.{_C.RESET} {_C.BGREEN}Run{_C.RESET}               {_C.BRED}{_C.BOLD}Q.{_C.RESET} {_C.BRED}Quit{_C.RESET}")
     print(f"  {_C.DIM}{'─' * 54}{_C.RESET}")
@@ -476,17 +491,23 @@ def show_menu():
             _edit_port(cfg)
         elif choice == "5":
             _edit_interval(cfg)
+        elif choice == "S":
+            _service_menu(cfg)
+        elif choice == "F":
+            _firewall_menu(cfg)
+        elif choice == "C":
+            _show_connected_clients()
         elif choice == "R":
             save_config(cfg)
             return cfg
         elif choice == "Q":
             return None
         else:
-            print(f"  {_C.RED}Invalid choice. Enter 1-5, R, or Q.{_C.RESET}")
+            print(f"  {_C.RED}Invalid choice. Enter 1-5, S, F, C, R, or Q.{_C.RESET}")
             input(f"  {_C.DIM}Press Enter to continue…{_C.RESET}")
             continue
 
-        if choice in ("1", "2", "3", "4", "5"):
+        if choice in ("1", "2", "3", "4", "5", "C"):
             input(f"\n  {_C.DIM}Press Enter to return to menu…{_C.RESET}")
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1650,22 +1671,34 @@ async def run_single_server(host: str, port: int, update_interval: float, device
     log.info(f"{'='*60}\n")
 
     async with server:
-        stop_requested = False
-        while not stop_requested:
-            try:
-                for dev, _, _ in devices:
-                    await dev.update()
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                log.warning(f"Update error (will retry): {exc}")
-            try:
-                await asyncio.sleep(update_interval)
-            except asyncio.CancelledError:
-                if await _shutdown_guard(server):
+        status_task = asyncio.create_task(_status_writer([
+            {"server": server, "endpoint": endpoint,
+             "device": ",".join(f"{v}x{k}" for k, v in dev_summary.items())}
+        ]))
+        try:
+            stop_requested = False
+            while not stop_requested:
+                try:
+                    for dev, _, _ in devices:
+                        await dev.update()
+                except asyncio.CancelledError:
                     break
-                # Client said no — keep running
-                log.info("Continuing… (clients still connected)")
+                except Exception as exc:
+                    log.warning(f"Update error (will retry): {exc}")
+                try:
+                    await asyncio.sleep(update_interval)
+                except asyncio.CancelledError:
+                    if await _shutdown_guard(server):
+                        break
+                    # Client said no — keep running
+                    log.info("Continuing… (clients still connected)")
+        finally:
+            status_task.cancel()
+            try:
+                await status_task
+            except asyncio.CancelledError:
+                pass
+            _clear_status_file()
 
 
 def _add_virtual_ips(interface: str, start_ip: str, count: int, prefix_len: int = 24):
@@ -1764,6 +1797,14 @@ async def run_ip_range_server(start_ip: str, port: int, update_interval: float,
             await ctx
             contexts.append(srv)
 
+        status_entries = [
+            {"server": srv,
+             "endpoint": f"opc.tcp://{ip}:{port}/opcua/sim",
+             "device": dtype}
+            for srv, _, ip, dtype in devices_with_servers
+        ]
+        status_task = asyncio.create_task(_status_writer(status_entries))
+
         try:
             stop_requested = False
             while not stop_requested:
@@ -1782,6 +1823,12 @@ async def run_ip_range_server(start_ip: str, port: int, update_interval: float,
                         break
                     log.info("Continuing… (clients still connected)")
         finally:
+            status_task.cancel()
+            try:
+                await status_task
+            except asyncio.CancelledError:
+                pass
+            _clear_status_file()
             for srv in contexts:
                 await srv.__aexit__(None, None, None)
     finally:
@@ -1799,6 +1846,382 @@ async def run_from_config(cfg: dict):
         )
     else:
         await run_single_server(cfg["host"], cfg["port"], cfg["interval"], cfg["devices"])
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Runtime status: each running server writes connected-client info here so the
+# menu (possibly in another process) can show who's connected.
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def _status_writer(server_entries: list, interval: float = 2.0):
+    """Periodically write connected-client snapshot to STATUS_FILE.
+
+    server_entries: list of dicts: {"server": Server, "endpoint": str, "device": str}.
+    """
+    try:
+        while True:
+            snapshot = {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "pid": os.getpid(),
+                "servers": [],
+            }
+            for entry in server_entries:
+                clients = []
+                transports = getattr(entry["server"].iserver, "asyncio_transports", []) or []
+                for t in list(transports):
+                    try:
+                        peer = t.get_extra_info("peername")
+                    except Exception:
+                        peer = None
+                    if peer:
+                        clients.append({"address": peer[0], "port": peer[1]})
+                snapshot["servers"].append({
+                    "endpoint": entry["endpoint"],
+                    "device": entry["device"],
+                    "client_count": len(clients),
+                    "clients": clients,
+                })
+            try:
+                STATUS_FILE.write_text(json.dumps(snapshot, indent=2))
+                # World-writable so the next run (possibly different user) can overwrite.
+                try:
+                    STATUS_FILE.chmod(0o666)
+                except OSError:
+                    pass
+            except OSError as exc:
+                log.debug(f"status write failed: {exc}")
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        pass
+
+
+def _clear_status_file():
+    """Remove the runtime status file on clean shutdown."""
+    try:
+        STATUS_FILE.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        log.debug(f"status unlink failed: {exc}")
+
+
+def _read_status_file():
+    """Read the status snapshot. Returns (data, age_sec) or (None, None)."""
+    try:
+        raw = STATUS_FILE.read_text()
+        data = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    try:
+        ts = datetime.fromisoformat(data["updated_at"].replace("Z", "+00:00"))
+        age = (datetime.now(timezone.utc) - ts).total_seconds()
+    except (KeyError, ValueError):
+        age = None
+    return data, age
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Systemd service management (menu actions)
+# ──────────────────────────────────────────────────────────────────────────────
+
+SERVICE_UNIT_TEMPLATE = """\
+[Unit]
+Description=OPC-UA Device Simulator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={user}
+Group={user}
+WorkingDirectory={workdir}
+ExecStart={python} {script} --no-menu
+Restart=on-failure
+RestartSec=5
+# Allow binding to ports <1024 if user picks one
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def _run(cmd, check=True, capture=True):
+    """Run a subprocess, returning the CompletedProcess. Logs on failure."""
+    try:
+        result = subprocess.run(
+            cmd,
+            check=False,
+            text=True,
+            capture_output=capture,
+        )
+    except FileNotFoundError as exc:
+        print(f"  {_C.RED}Command not found: {exc}{_C.RESET}")
+        return None
+    if check and result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        if stderr:
+            print(f"  {_C.RED}{' '.join(cmd)}{_C.RESET}\n  {_C.DIM}{stderr}{_C.RESET}")
+    return result
+
+
+def _service_exists():
+    r = _run(["systemctl", "list-unit-files", SERVICE_NAME, "--no-legend"], check=False)
+    return bool(r and r.stdout and SERVICE_NAME in r.stdout)
+
+
+def _service_active():
+    r = _run(["systemctl", "is-active", SERVICE_NAME], check=False)
+    return bool(r and (r.stdout or "").strip() == "active")
+
+
+def _service_enabled():
+    r = _run(["systemctl", "is-enabled", SERVICE_NAME], check=False)
+    return bool(r and (r.stdout or "").strip() == "enabled")
+
+
+def _service_install(cfg):
+    """Create the system user, copy script + config, write unit, enable service."""
+    print(f"\n  {_C.CYAN}{_C.BOLD}── Install systemd service ──{_C.RESET}")
+    print(f"  {_C.DIM}Plan:{_C.RESET}")
+    print(f"    • Create system user '{SERVICE_USER}' (if missing)")
+    print(f"    • Copy script + config to {SERVICE_INSTALL_DIR}")
+    print(f"    • Write {SERVICE_UNIT_PATH}")
+    print(f"    • Enable {SERVICE_NAME} at boot")
+    print(f"  {_C.DIM}(uses sudo — you may be prompted){_C.RESET}\n")
+    confirm = input(f"  {_C.BWHITE}Proceed? (y/N): {_C.RESET}").strip().lower()
+    if confirm != "y":
+        print(f"  {_C.YELLOW}Cancelled.{_C.RESET}")
+        return
+
+    # 1. Ensure config saved so the service has something to load
+    save_config(cfg)
+
+    # 2. Create system user if missing
+    r = _run(["id", "-u", SERVICE_USER], check=False)
+    user_exists = bool(r and r.returncode == 0)
+    if not user_exists:
+        useradd = _run([
+            "sudo", "useradd", "--system", "--no-create-home",
+            "--shell", "/usr/sbin/nologin", SERVICE_USER,
+        ])
+        if not useradd or useradd.returncode != 0:
+            print(f"  {_C.RED}Failed to create user '{SERVICE_USER}'. Aborting.{_C.RESET}")
+            return
+        print(f"  {_C.GREEN}✓ Created system user {SERVICE_USER}{_C.RESET}")
+    else:
+        print(f"  {_C.DIM}User {SERVICE_USER} already exists.{_C.RESET}")
+
+    # 3. Stage files into /opt/opcua-sim (system-readable; avoids /home traversal issue)
+    src_script = Path(__file__).resolve()
+    src_config = CONFIG_PATH
+
+    if _run(["sudo", "mkdir", "-p", str(SERVICE_INSTALL_DIR)]).returncode != 0:
+        return
+    if _run(["sudo", "cp", str(src_script), str(SERVICE_INSTALL_DIR / "opcua_sim.py")]).returncode != 0:
+        return
+    if src_config.exists():
+        _run(["sudo", "cp", str(src_config), str(SERVICE_INSTALL_DIR / "opcua_sim_config.json")])
+    _run(["sudo", "chown", "-R", f"{SERVICE_USER}:{SERVICE_USER}", str(SERVICE_INSTALL_DIR)])
+    _run(["sudo", "chmod", "755", str(SERVICE_INSTALL_DIR / "opcua_sim.py")])
+    print(f"  {_C.GREEN}✓ Staged files in {SERVICE_INSTALL_DIR}{_C.RESET}")
+
+    # 4. Find python3 that has asyncua available (use absolute path in unit)
+    py = subprocess.run(["which", "python3"], capture_output=True, text=True).stdout.strip() or "/usr/bin/python3"
+
+    unit_text = SERVICE_UNIT_TEMPLATE.format(
+        user=SERVICE_USER,
+        workdir=str(SERVICE_INSTALL_DIR),
+        python=py,
+        script=str(SERVICE_INSTALL_DIR / "opcua_sim.py"),
+    )
+
+    # 5. Write unit file via sudo tee
+    tee = subprocess.run(
+        ["sudo", "tee", str(SERVICE_UNIT_PATH)],
+        input=unit_text, text=True, capture_output=True,
+    )
+    if tee.returncode != 0:
+        print(f"  {_C.RED}Failed to write unit file: {tee.stderr.strip()}{_C.RESET}")
+        return
+    _run(["sudo", "chmod", "644", str(SERVICE_UNIT_PATH)])
+    print(f"  {_C.GREEN}✓ Wrote {SERVICE_UNIT_PATH}{_C.RESET}")
+
+    # 6. Reload + enable
+    _run(["sudo", "systemctl", "daemon-reload"])
+    enable = _run(["sudo", "systemctl", "enable", SERVICE_NAME])
+    if enable and enable.returncode == 0:
+        print(f"  {_C.GREEN}✓ Enabled {SERVICE_NAME} at boot{_C.RESET}")
+
+    # asyncua must be installed for the opcua user. It's a pure-python package;
+    # if it's not site-wide, the service will fail on start. Hint accordingly.
+    chk = subprocess.run(
+        ["sudo", "-u", SERVICE_USER, py, "-c", "import asyncua"],
+        capture_output=True, text=True,
+    )
+    if chk.returncode != 0:
+        print(f"  {_C.YELLOW}⚠ asyncua not importable as user {SERVICE_USER}.{_C.RESET}")
+        print(f"    {_C.DIM}Install system-wide:  sudo {py} -m pip install asyncua{_C.RESET}")
+
+
+def _service_remove():
+    """Stop, disable, and remove the systemd service. Optionally remove staged files / user."""
+    if not _service_exists():
+        print(f"  {_C.YELLOW}Service {SERVICE_NAME} is not installed.{_C.RESET}")
+        return
+    print(f"\n  {_C.CYAN}{_C.BOLD}── Remove systemd service ──{_C.RESET}")
+    confirm = input(f"  {_C.BWHITE}Remove {SERVICE_NAME}? (y/N): {_C.RESET}").strip().lower()
+    if confirm != "y":
+        print(f"  {_C.YELLOW}Cancelled.{_C.RESET}")
+        return
+
+    _run(["sudo", "systemctl", "stop", SERVICE_NAME], check=False)
+    _run(["sudo", "systemctl", "disable", SERVICE_NAME], check=False)
+    _run(["sudo", "rm", "-f", str(SERVICE_UNIT_PATH)])
+    _run(["sudo", "systemctl", "daemon-reload"])
+    print(f"  {_C.GREEN}✓ Removed {SERVICE_NAME}{_C.RESET}")
+
+    extra = input(f"\n  {_C.BWHITE}Also remove {SERVICE_INSTALL_DIR} and user '{SERVICE_USER}'? (y/N): {_C.RESET}").strip().lower()
+    if extra == "y":
+        _run(["sudo", "rm", "-rf", str(SERVICE_INSTALL_DIR)])
+        _run(["sudo", "userdel", SERVICE_USER], check=False)
+        print(f"  {_C.GREEN}✓ Removed staged files and user{_C.RESET}")
+
+
+def _service_action(action: str):
+    """action ∈ {start, stop, restart, status}."""
+    if not _service_exists():
+        print(f"  {_C.YELLOW}Service {SERVICE_NAME} is not installed yet.{_C.RESET}")
+        return
+    if action == "status":
+        # Show status interactively (don't capture so the user sees colored output)
+        subprocess.run(["systemctl", "status", SERVICE_NAME, "--no-pager"])
+        return
+    r = _run(["sudo", "systemctl", action, SERVICE_NAME])
+    if r and r.returncode == 0:
+        print(f"  {_C.GREEN}✓ systemctl {action} {SERVICE_NAME}{_C.RESET}")
+
+
+def _service_menu(cfg):
+    """Submenu for service install / remove / start / stop / restart / status."""
+    while True:
+        installed = _service_exists()
+        active    = _service_active() if installed else False
+        enabled   = _service_enabled() if installed else False
+
+        if installed:
+            state = (
+                f"{_C.GREEN}active{_C.RESET}" if active else f"{_C.DIM}inactive{_C.RESET}"
+            )
+            boot  = (
+                f"{_C.GREEN}enabled{_C.RESET}" if enabled else f"{_C.DIM}disabled{_C.RESET}"
+            )
+            status_line = f"installed, {state}, boot {boot}"
+        else:
+            status_line = f"{_C.DIM}not installed{_C.RESET}"
+
+        print(f"\n  {_C.CYAN}{_C.BOLD}── Service ── {_C.RESET} {status_line}")
+        print(f"    {_C.BWHITE}1.{_C.RESET} Install (enable at boot)")
+        print(f"    {_C.BWHITE}2.{_C.RESET} Remove")
+        print(f"    {_C.BWHITE}3.{_C.RESET} Start")
+        print(f"    {_C.BWHITE}4.{_C.RESET} Stop")
+        print(f"    {_C.BWHITE}5.{_C.RESET} Restart")
+        print(f"    {_C.BWHITE}6.{_C.RESET} Status (full)")
+        print(f"    {_C.BWHITE}B.{_C.RESET} Back")
+        choice = input(f"  {_C.BWHITE}Select: {_C.RESET}").strip().upper()
+        if   choice == "1": _service_install(cfg)
+        elif choice == "2": _service_remove()
+        elif choice == "3": _service_action("start")
+        elif choice == "4": _service_action("stop")
+        elif choice == "5": _service_action("restart")
+        elif choice == "6": _service_action("status")
+        elif choice == "B": return
+        else:
+            print(f"  {_C.RED}Invalid choice.{_C.RESET}")
+            continue
+        input(f"\n  {_C.DIM}Press Enter to continue…{_C.RESET}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Firewall management (ufw)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _ufw_available():
+    return subprocess.run(["which", "ufw"], capture_output=True).returncode == 0
+
+
+def _ufw_port_open(port: int):
+    """Return True if there's a ufw rule allowing this port (any proto)."""
+    r = _run(["sudo", "ufw", "status"], check=False)
+    if not r or r.returncode != 0:
+        return False
+    needle = f"{port}/tcp"
+    return any(needle in line and "ALLOW" in line.upper() for line in (r.stdout or "").splitlines())
+
+
+def _firewall_menu(cfg):
+    if not _ufw_available():
+        print(f"  {_C.RED}ufw is not installed. Install with: sudo apt install ufw{_C.RESET}")
+        return
+    port = int(cfg.get("port", 4840))
+    while True:
+        is_open = _ufw_port_open(port)
+        state = f"{_C.GREEN}open{_C.RESET}" if is_open else f"{_C.DIM}closed{_C.RESET}"
+        print(f"\n  {_C.CYAN}{_C.BOLD}── Firewall (ufw) ──{_C.RESET}  port {port}/tcp: {state}")
+        print(f"    {_C.BWHITE}1.{_C.RESET} Open port {port}/tcp")
+        print(f"    {_C.BWHITE}2.{_C.RESET} Close port {port}/tcp (revert)")
+        print(f"    {_C.BWHITE}3.{_C.RESET} Show ufw status")
+        print(f"    {_C.BWHITE}B.{_C.RESET} Back")
+        choice = input(f"  {_C.BWHITE}Select: {_C.RESET}").strip().upper()
+        if choice == "1":
+            r = _run([
+                "sudo", "ufw", "allow", f"{port}/tcp",
+                "comment", FIREWALL_COMMENT,
+            ])
+            if r and r.returncode == 0:
+                print(f"  {_C.GREEN}✓ Opened {port}/tcp{_C.RESET}")
+        elif choice == "2":
+            r = _run(["sudo", "ufw", "delete", "allow", f"{port}/tcp"])
+            if r and r.returncode == 0:
+                print(f"  {_C.GREEN}✓ Closed {port}/tcp{_C.RESET}")
+        elif choice == "3":
+            subprocess.run(["sudo", "ufw", "status", "verbose"])
+        elif choice == "B":
+            return
+        else:
+            print(f"  {_C.RED}Invalid choice.{_C.RESET}")
+            continue
+        input(f"\n  {_C.DIM}Press Enter to continue…{_C.RESET}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Connected-client viewer
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _show_connected_clients():
+    print(f"\n  {_C.CYAN}{_C.BOLD}── Connected Clients ──{_C.RESET}")
+    data, age = _read_status_file()
+    if data is None:
+        print(f"  {_C.YELLOW}No status file at {STATUS_FILE} — is the simulator running?{_C.RESET}")
+        return
+    if age is not None and age > 10:
+        print(f"  {_C.YELLOW}⚠ Status snapshot is {int(age)}s old — server may be stopped.{_C.RESET}")
+    else:
+        print(f"  {_C.DIM}Snapshot age: {int(age) if age is not None else '?'}s   pid: {data.get('pid')}{_C.RESET}")
+
+    servers = data.get("servers", [])
+    if not servers:
+        print(f"  {_C.DIM}No servers reporting.{_C.RESET}")
+        return
+
+    for s in servers:
+        ep = s.get("endpoint", "?")
+        dev = s.get("device", "?")
+        clients = s.get("clients", [])
+        header_color = _C.GREEN if clients else _C.DIM
+        print(f"\n  {header_color}{ep}{_C.RESET}  {_C.DIM}[{dev}]{_C.RESET}  → {len(clients)} client(s)")
+        for c in clients:
+            print(f"    • {c.get('address')}:{c.get('port')}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
