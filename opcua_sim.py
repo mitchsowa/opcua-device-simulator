@@ -2216,8 +2216,20 @@ def _ufw_port_open(port: int):
 
 def _firewall_menu(cfg):
     if not _ufw_available():
-        print(f"  {_C.RED}ufw is not installed. Install with: sudo apt install ufw{_C.RESET}")
-        return
+        print(f"\n  {_C.CYAN}{_C.BOLD}── Firewall (ufw) ──{_C.RESET}")
+        print(f"  {_C.RED}ufw is not installed.{_C.RESET}")
+        ans = input(f"  {_C.BWHITE}Install it now with apt? (y/N): {_C.RESET}").strip().lower()
+        if ans == "y":
+            r = _run(["sudo", "apt", "install", "-y", "ufw"], capture=False)
+            if r and r.returncode == 0:
+                print(f"  {_C.GREEN}✓ ufw installed{_C.RESET}")
+            else:
+                print(f"  {_C.RED}Install failed. Try manually: sudo apt install ufw{_C.RESET}")
+                input(f"\n  {_C.DIM}Press Enter to continue…{_C.RESET}")
+                return
+        else:
+            input(f"\n  {_C.DIM}Press Enter to continue…{_C.RESET}")
+            return
     port = int(cfg.get("port", 4840))
     while True:
         is_open = _ufw_port_open(port)
