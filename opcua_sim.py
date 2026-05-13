@@ -1701,13 +1701,38 @@ async def run_single_server(host: str, port: int, update_interval: float, device
             _clear_status_file()
 
 
+def _has_net_admin() -> bool:
+    """Return True if the current process already has CAP_NET_ADMIN.
+
+    True for root, and for systemd services started with
+    AmbientCapabilities=CAP_NET_ADMIN. When True, we skip 'sudo' for ip-addr
+    commands (the service user can't sudo anyway).
+    """
+    if os.geteuid() == 0:
+        return True
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("CapEff:"):
+                    cap_eff = int(line.split()[1], 16)
+                    return bool(cap_eff & (1 << 12))  # CAP_NET_ADMIN = 12
+    except (OSError, ValueError):
+        pass
+    return False
+
+
+def _ip_cmd(*args):
+    """Prefix with sudo only when we lack CAP_NET_ADMIN."""
+    return (["sudo"] if not _has_net_admin() else []) + list(args)
+
+
 def _add_virtual_ips(interface: str, start_ip: str, count: int, prefix_len: int = 24):
     """Add virtual IP addresses to a network interface. Returns list of IPs added."""
     base = int(ipaddress.ip_address(start_ip))
     added_ips = []
     for i in range(count):
         ip = str(ipaddress.ip_address(base + i))
-        cmd = ["sudo", "ip", "addr", "add", f"{ip}/{prefix_len}", "dev", interface]
+        cmd = _ip_cmd("ip", "addr", "add", f"{ip}/{prefix_len}", "dev", interface)
         try:
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode == 0:
@@ -1727,7 +1752,7 @@ def _add_virtual_ips(interface: str, start_ip: str, count: int, prefix_len: int 
 def _remove_virtual_ips(interface: str, ips: list, prefix_len: int = 24):
     """Remove virtual IP addresses from a network interface."""
     for ip in ips:
-        cmd = ["sudo", "ip", "addr", "del", f"{ip}/{prefix_len}", "dev", interface]
+        cmd = _ip_cmd("ip", "addr", "del", f"{ip}/{prefix_len}", "dev", interface)
         try:
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode == 0:
@@ -1938,8 +1963,10 @@ WorkingDirectory={workdir}
 ExecStart={python} {script} --no-menu
 Restart=on-failure
 RestartSec=5
-# Allow binding to ports <1024 if user picks one
-AmbientCapabilities=CAP_NET_BIND_SERVICE
+# CAP_NET_BIND_SERVICE: bind to ports <1024 if configured.
+# CAP_NET_ADMIN:        add/remove virtual IPs in ip_range mode.
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
 
 [Install]
 WantedBy=multi-user.target
