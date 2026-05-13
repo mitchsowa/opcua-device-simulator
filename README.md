@@ -14,7 +14,11 @@ Configure up to 12 device nodes (mixed or same type) via an interactive text men
 
 ## Features
 
+- **One-command launcher** — `./start.sh` checks Python, creates a venv if `asyncua` is missing (handles PEP 668 / `externally-managed-environment` on Debian / Raspberry Pi OS), then launches the simulator
 - **Interactive menu** — configure device types, counts, network mode, host, port, and update interval from a color TUI; config is persisted to `opcua_sim_config.json` and reloaded automatically
+- **Built-in systemd integration** — install/remove a `opcua-sim` service from the menu (runs as a dedicated `opcua` system user out of `/opt/opcua-sim/`, with `CAP_NET_ADMIN` for virtual-IP creation); start/stop/restart/status from the same submenu
+- **Built-in firewall (`ufw`) management** — open or revert the configured TCP port from the menu; offers `apt install ufw` if it isn't present
+- **Connected-client viewer** — the running server writes a snapshot of every connected OPC-UA session (per endpoint) to `/tmp/opcua_sim_status.json`; the menu's **C** option pretty-prints it
 - **Up to 12 devices** — mix and match Opto22, Siemens, and Unitronics nodes in any combination
 - **Two network modes** — run all devices on a single endpoint (`same_ip`), or assign each device its own virtual IP from a range (`ip_range` — auto-creates/cleans up virtual IPs on a chosen interface)
 - **Accurate node hierarchies** — each device's tree mirrors what you actually browse on the real hardware, not a generic flat layout
@@ -33,11 +37,9 @@ Configure up to 12 device nodes (mixed or same type) via an interactive text men
 ## Requirements
 
 - Python 3.9 or newer
-- `asyncua >= 1.1.0`
-
-```bash
-pip install -r requirements.txt
-```
+- `asyncua >= 1.1.0` (installed automatically by `./start.sh` if missing)
+- Linux for `ip_range` mode (uses `ip addr add` to create virtual IPs); other modes work cross-platform
+- `python3-venv` recommended on Debian / Raspberry Pi OS (the launcher uses a venv to satisfy PEP 668)
 
 ---
 
@@ -46,15 +48,17 @@ pip install -r requirements.txt
 ```bash
 git clone https://github.com/mitchsowa/opcua-device-simulator.git
 cd opcua-device-simulator
-pip install -r requirements.txt
-python opcua_sim.py
+./start.sh
 ```
 
-The interactive menu lets you pick device types, counts, network mode, and connection settings. Config is saved to `opcua_sim_config.json` and reloaded next time you run.
+`start.sh` checks for `asyncua`; if it's missing it creates `.venv/` and installs it there, then launches the simulator. On the first run with no saved config you get **8 Siemens PLCs in `ip_range` mode starting at `192.168.10.108`** — adjust via the menu, then press **R** to save and run.
 
-Then connect any OPC-UA client to:
+Connect any OPC-UA client to:
 ```
-opc.tcp://<host>:4840/opcua/sim
+opc.tcp://<host>:4840/opcua/sim          # same_ip mode
+opc.tcp://192.168.10.108:4840/opcua/sim  # ip_range mode (one endpoint per IP)
+...
+opc.tcp://192.168.10.115:4840/opcua/sim
 ```
 
 ---
@@ -62,7 +66,8 @@ opc.tcp://<host>:4840/opcua/sim
 ## Usage
 
 ```
-python opcua_sim.py [--host HOST] [--port PORT] [--interval SECONDS] [--no-menu]
+./start.sh [-- args forwarded to opcua_sim.py]
+python3 opcua_sim.py [--host HOST] [--port PORT] [--interval SECONDS] [--no-menu]
 
 Options:
   --host      Bind address          (default: 0.0.0.0)
@@ -73,30 +78,44 @@ Options:
 
 ### Interactive mode (default)
 
-Running `python opcua_sim.py` opens a text menu where you can:
+Running `./start.sh` opens a text menu:
 
-1. **Configure devices** — choose a device type and count (up to 12), or build a mixed list
-2. **Set network mode** — `same_ip` (all on one endpoint) or `ip_range` (one server per IP)
-3. **Set host / IP range** — bind address or starting IP for range mode
-4. **Set port and update interval**
+```
+1. Device selection      8 total — 8x Siemens S7-1200
+2. Network mode          IP Range (one server per IP)
+3. Host / IP range       192.168.10.108 → 192.168.10.115  port 4840
+4. Port                  4840
+5. Update interval       1.0s
+──────────────────────────────────────────────────────
+S. Service              install / remove / start / stop / restart
+F. Firewall (ufw)       open / close port 4840/tcp
+C. Connected clients    show who's connected to each PLC
+──────────────────────────────────────────────────────
+R. Run                  Q. Quit
+```
 
-Press **R** to save config and start the server, **Q** to quit. Ctrl+C during the server returns to the menu.
+- **1 – 5** edit device/network settings.
+- **S** opens the systemd submenu — install (registers `opcua-sim.service`, creates the `opcua` system user, copies the script + current config to `/opt/opcua-sim/`, creates a venv there if needed, enables at boot), remove, start/stop/restart, or show full status.
+- **F** opens or closes the configured port in `ufw`. Offers to `apt install ufw` first if it isn't installed.
+- **C** reads `/tmp/opcua_sim_status.json` (written every 2 s by the running server) and lists each endpoint with the IP:port of every connected client.
+- **R** saves config and starts the server. Ctrl+C with clients connected prompts before stopping; otherwise returns to the menu.
+- **Q** quits.
 
 ### Headless mode
 
 ```bash
-# Use saved config (or defaults: one of each device on 0.0.0.0:4840)
-python opcua_sim.py --no-menu
+# Use saved config (or defaults: 8x Siemens in ip_range mode @ 192.168.10.108)
+./start.sh --no-menu
 
-# Override host/port/interval
-python opcua_sim.py --no-menu --host 127.0.0.1 --port 4841 --interval 0.5
+# Override port/interval (host/start_ip come from saved config or defaults)
+./start.sh --no-menu --port 4841 --interval 0.5
 ```
 
 ### Network modes
 
 **Same IP** — all devices share a single OPC-UA endpoint. Device trees are isolated under the root Objects folder.
 
-**IP Range** — each device gets its own virtual IP on a chosen network interface. The simulator adds virtual IPs on startup (requires `sudo` for `ip addr add`) and removes them on shutdown. Example: 4 devices starting at `192.168.1.10` creates endpoints on `.10`, `.11`, `.12`, `.13`.
+**IP Range** — each device gets its own virtual IP on a chosen network interface. The simulator adds virtual IPs on startup (`ip addr add`) and removes them on shutdown. Interactive runs use `sudo`; the bundled systemd service has `CAP_NET_ADMIN` ambient capability and adds them without sudo. Example: 8 devices starting at `192.168.10.108` creates endpoints on `.108 – .115`.
 
 ---
 
@@ -310,28 +329,55 @@ docker run -p 4840:4840 opcua-sim --no-menu --interval 0.5
 
 ## Running as a systemd Service
 
+The menu's **S** option installs and manages a systemd unit for you. No need to hand-write one.
+
+```
+./start.sh   →   S → 1 (Install)
+```
+
+Install does the following (you'll be prompted with `sudo` once):
+
+1. Creates the system user `opcua` (`useradd --system --no-create-home --shell /usr/sbin/nologin`)
+2. Stages `opcua_sim.py` and the current `opcua_sim_config.json` in `/opt/opcua-sim/` owned by `opcua` (this avoids `/home/<user>/` traversal issues when the service runs as a different user)
+3. If the system Python can't import `asyncua` as the `opcua` user, creates `/opt/opcua-sim/venv/` and installs `asyncua` into it; uses that interpreter in the unit file
+4. Writes `/etc/systemd/system/opcua-sim.service` with `AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN` (so the service can bind low ports and create virtual IPs without `sudo`)
+5. `daemon-reload` + `systemctl enable`
+
+The generated unit looks like:
+
 ```ini
-# /etc/systemd/system/opcua-sim.service
 [Unit]
 Description=OPC-UA Device Simulator
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-ExecStart=/usr/bin/python3 /opt/opcua-device-simulator/opcua_sim.py --no-menu --port 4840
-WorkingDirectory=/opt/opcua-device-simulator
+Type=simple
+User=opcua
+Group=opcua
+WorkingDirectory=/opt/opcua-sim
+ExecStart=/opt/opcua-sim/venv/bin/python /opt/opcua-sim/opcua_sim.py --no-menu
 Restart=on-failure
 RestartSec=5
-User=nobody
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now opcua-sim
-sudo systemctl status opcua-sim
-```
+Other items in the **S** submenu:
+
+| Option | Action |
+|---|---|
+| 1. Install | Idempotent — also refreshes the staged script + config when re-run |
+| 2. Remove | Stops, disables, removes the unit file; optionally removes `/opt/opcua-sim/` and the `opcua` user |
+| 3. Start | `systemctl start opcua-sim` |
+| 4. Stop | `systemctl stop opcua-sim` |
+| 5. Restart | `systemctl restart opcua-sim` |
+| 6. Status | Full `systemctl status` output |
+
+**Note:** edits made to `opcua_sim.py` or the config after install don't propagate automatically — re-run **S → 1** to push them into `/opt/opcua-sim/`.
 
 ---
 
@@ -372,13 +418,24 @@ See the [python-asyncua security docs](https://python-asyncua.readthedocs.io/en/
 ```
 opcua-device-simulator/
 ├── opcua_sim.py              # Simulator — device classes, menu, server modes
+├── start.sh                  # Launcher — ensures Python + asyncua (creates venv if needed)
 ├── opcua_sim_config.json     # Saved config (auto-generated, gitignored)
 ├── requirements.txt          # Python dependencies
 ├── setup.py                  # Install as package / console script (optional)
 ├── Dockerfile                # Container image
+├── .venv/                    # Auto-created if system Python is PEP 668-protected (gitignored)
 ├── .gitignore
 └── README.md
 ```
+
+**Runtime files** (not in the repo):
+
+| Path | Purpose |
+|---|---|
+| `opcua_sim_config.json` | Persisted menu config (next to `opcua_sim.py`) |
+| `/tmp/opcua_sim_status.json` | Per-server connected-client snapshot, refreshed every 2 s |
+| `/opt/opcua-sim/` | Staged script + config when running as a systemd service |
+| `/etc/systemd/system/opcua-sim.service` | Generated unit file |
 
 ---
 
