@@ -2026,8 +2026,46 @@ def _service_install(cfg):
     _run(["sudo", "chmod", "755", str(SERVICE_INSTALL_DIR / "opcua_sim.py")])
     print(f"  {_C.GREEN}✓ Staged files in {SERVICE_INSTALL_DIR}{_C.RESET}")
 
-    # 4. Find python3 that has asyncua available (use absolute path in unit)
-    py = subprocess.run(["which", "python3"], capture_output=True, text=True).stdout.strip() or "/usr/bin/python3"
+    # 4. Pick the python that will run the service.
+    # Prefer system python3 if it can already import asyncua as the service
+    # user; otherwise create a venv inside the install dir.
+    sys_py = subprocess.run(["which", "python3"], capture_output=True, text=True).stdout.strip() or "/usr/bin/python3"
+    venv_dir = SERVICE_INSTALL_DIR / "venv"
+    venv_py  = venv_dir / "bin" / "python"
+
+    chk = subprocess.run(
+        ["sudo", "-u", SERVICE_USER, sys_py, "-c", "import asyncua"],
+        capture_output=True, text=True,
+    )
+    if chk.returncode == 0:
+        py = sys_py
+        print(f"  {_C.DIM}asyncua importable system-wide; using {py}{_C.RESET}")
+    else:
+        print(f"  {_C.DIM}asyncua not importable system-wide — creating venv at {venv_dir}…{_C.RESET}")
+        # Create venv as the service user (it owns the install dir).
+        mk = subprocess.run(
+            ["sudo", "-u", SERVICE_USER, sys_py, "-m", "venv", str(venv_dir)],
+            capture_output=True, text=True,
+        )
+        if mk.returncode != 0:
+            stderr = (mk.stderr or "").strip()
+            print(f"  {_C.RED}venv creation failed:{_C.RESET}\n  {_C.DIM}{stderr}{_C.RESET}")
+            if "ensurepip" in stderr:
+                print(f"  {_C.YELLOW}Install: sudo apt install python3-venv python3-full{_C.RESET}")
+            return
+
+        # Install asyncua inside the venv.
+        print(f"  {_C.DIM}Installing asyncua into venv…{_C.RESET}")
+        inst = subprocess.run(
+            ["sudo", "-u", SERVICE_USER, str(venv_py), "-m", "pip", "install",
+             "--quiet", "asyncua>=1.1.0"],
+            capture_output=True, text=True,
+        )
+        if inst.returncode != 0:
+            print(f"  {_C.RED}pip install failed:{_C.RESET}\n  {_C.DIM}{(inst.stderr or '').strip()}{_C.RESET}")
+            return
+        py = str(venv_py)
+        print(f"  {_C.GREEN}✓ Venv ready: {py}{_C.RESET}")
 
     unit_text = SERVICE_UNIT_TEMPLATE.format(
         user=SERVICE_USER,
@@ -2052,16 +2090,6 @@ def _service_install(cfg):
     enable = _run(["sudo", "systemctl", "enable", SERVICE_NAME])
     if enable and enable.returncode == 0:
         print(f"  {_C.GREEN}✓ Enabled {SERVICE_NAME} at boot{_C.RESET}")
-
-    # asyncua must be installed for the opcua user. It's a pure-python package;
-    # if it's not site-wide, the service will fail on start. Hint accordingly.
-    chk = subprocess.run(
-        ["sudo", "-u", SERVICE_USER, py, "-c", "import asyncua"],
-        capture_output=True, text=True,
-    )
-    if chk.returncode != 0:
-        print(f"  {_C.YELLOW}⚠ asyncua not importable as user {SERVICE_USER}.{_C.RESET}")
-        print(f"    {_C.DIM}Install system-wide:  sudo {py} -m pip install asyncua{_C.RESET}")
 
 
 def _service_remove():
